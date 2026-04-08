@@ -1,0 +1,36 @@
+{
+  "providers": {
+    "default": {
+      "baseUrl": "https://api.anthropic.com",
+      "apiKey": "",
+      "api": "anthropic-messages",
+      "headers": {},
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "sonnet",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 64000
+        },
+        {
+          "id": "claude-opus-4-6",
+          "name": "opus",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 64000
+        }
+      ]
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "default/claude-sonnet-4-6",
+        "fallbacks": ["default/claude-opus-4-6"]
+      }
+    }
+  }
+}

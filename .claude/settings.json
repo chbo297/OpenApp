@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git stash:*)",
+      "Bash(sed -i '' 's/public let group: ToolGroup = \\\\.core/public let group: String = \"\"core\"\"/g' Sources/Core/Tools/TodoTool.swift Sources/Core/Tools/ClarifyTool.swift Sources/Core/Tools/MemoryTool.swift Sources/Core/Tools/DelegateTaskTool.swift Sources/Core/Tools/SessionSearchTool.swift)",
+      "Bash(sed -i '' 's/public let group: ToolGroup = \\\\.file/public let group: String = \"\"file\"\"/g' Sources/Core/Tools/FileReadTool.swift Sources/Core/Tools/FileWriteTool.swift Sources/Core/Tools/FileSearchTool.swift)",
+      "Bash(sed -i '' 's/public let group: ToolGroup = \\\\.skills/public let group: String = \"\"skills\"\"/g' Sources/Core/Tools/SkillsTool.swift)",
+      "Bash(sed -i '' 's/public let group: ToolGroup = \\\\.media/public let group: String = \"\"media\"\"/g' Sources/Core/Tools/TextToSpeechTool.swift Sources/Core/Tools/VisionAnalyzeTool.swift)",
+      "Bash(sed -i '' 's/public let group: ToolGroup = \\\\.web/public let group: String = \"\"web\"\"/g' Sources/Core/Tools/WebSearchTool.swift)",
+      "Bash(sed -i '' 's/public let group: ToolGroup = \\\\.system/public let group: String = \"\"system\"\"/g' Sources/Core/Tools/ClipboardTool.swift Sources/Core/Tools/HapticTool.swift)",
+      "Bash(sed -i '' 's/public let group: ToolGroup = \\\\.appSpecific/public let group: String = \"\"custom\"\"/g' Sources/Core/Tools/AppActionTool.swift Sources/Core/Tools/AppNavigateTool.swift Sources/Core/Tools/AppStateTool.swift)",
+      "Bash(swift -frontend -typecheck /Users/bo/DucLoc/github/OpenAPP/Sources/Core/Agent/AgentProfile.swift -I /Users/bo/DucLoc/github/OpenAPP/.build/debug)",
+      "Read(//Users/bo/DucLoc/GitUse/openclaw/**)"
+    ]
+  }
+}
