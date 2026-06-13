@@ -116,14 +116,13 @@ struct DemoConfig {
     }
 
     /// All model configurations from the primary provider, converted to SDK type.
-    static var modelConfigs: [ModelConfiguration] {
+    static var modelConfigs: [ModelSpec] {
         guard let entries = primaryProvider?.models, !entries.isEmpty else {
-            return [ModelConfiguration(id: "claude-sonnet-4-20250514")]
+            return [ModelSpec(id: "claude-sonnet-4-20250514")]
         }
         return entries.map { entry in
-            ModelConfiguration(
+            ModelSpec(
                 id: entry.id,
-                name: entry.name,
                 reasoning: entry.reasoning ?? false,
                 inputModalities: entry.input ?? ["text"],
                 contextWindow: entry.contextWindow ?? 200_000,
@@ -164,9 +163,8 @@ struct DemoConfig {
             guard let models = entry.models, !models.isEmpty else { return nil }
 
             let modelConfigs = models.map { m in
-                ModelConfiguration(
+                ModelSpec(
                     id: m.id,
-                    name: m.name,
                     reasoning: m.reasoning ?? false,
                     inputModalities: m.input ?? ["text"],
                     contextWindow: m.contextWindow ?? 200_000,
@@ -192,14 +190,14 @@ struct DemoConfig {
         }
     }
 
-    // MARK: - Model Selector
+    // MARK: - Model Policy
 
-    /// The model selector from the agents section, if present.
-    static var modelPolicy: ModelProviderCentral.ModelPolicy? {
-        guard let model = loaded?.agents?.defaults?.model else { return nil }
-        return ModelProviderCentral.ModelPolicy(
-            primary: model.primary,
-            fallbacks: model.fallbacks ?? []
+    /// The model policy from the agents section, if present.
+    static var modelPolicy: ModelPolicy? {
+        guard let selection = loaded?.agents?.defaults?.model else { return nil }
+        return ModelPolicy(
+            primary: selection.primary,
+            fallbacks: selection.fallbacks ?? []
         )
     }
 }

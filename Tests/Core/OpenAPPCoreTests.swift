@@ -128,42 +128,38 @@ final class OpenAPPCoreTests: XCTestCase {
 
     // MARK: - Provider Configuration
 
-    func testModelConfigurationDefaults() {
-        let model = ModelConfiguration(id: "test-model")
+    func testModelSpecDefaults() {
+        let model = ModelSpec(id: "test-model")
         XCTAssertEqual(model.id, "test-model")
-        XCTAssertEqual(model.name, "test-model") // defaults to id
         XCTAssertFalse(model.reasoning)
         XCTAssertEqual(model.inputModalities, ["text"])
         XCTAssertEqual(model.contextWindow, 200_000)
         XCTAssertEqual(model.maxTokens, 64_000)
     }
 
-    func testModelConfigurationCodable() throws {
-        let model = ModelConfiguration(
+    func testModelSpecCodable() throws {
+        let model = ModelSpec(
             id: "Claude Opus 4.6",
-            name: "opus",
             reasoning: false,
             inputModalities: ["text", "image"],
             contextWindow: 200_000,
             maxTokens: 64_000
         )
         let data = try JSONEncoder().encode(model)
-        let decoded = try JSONDecoder().decode(ModelConfiguration.self, from: data)
+        let decoded = try JSONDecoder().decode(ModelSpec.self, from: data)
         XCTAssertEqual(decoded.id, model.id)
-        XCTAssertEqual(decoded.name, model.name)
         XCTAssertEqual(decoded.reasoning, model.reasoning)
         XCTAssertEqual(decoded.inputModalities, model.inputModalities)
         XCTAssertEqual(decoded.contextWindow, model.contextWindow)
         XCTAssertEqual(decoded.maxTokens, model.maxTokens)
     }
 
-    func testModelConfigurationMinimalJSON() throws {
+    func testModelSpecMinimalJSON() throws {
         // Minimal JSON with only "id" — all other fields should use defaults
         let json = #"{"id":"fast-model"}"#
         let data = json.data(using: .utf8)!
-        let decoded = try JSONDecoder().decode(ModelConfiguration.self, from: data)
+        let decoded = try JSONDecoder().decode(ModelSpec.self, from: data)
         XCTAssertEqual(decoded.id, "fast-model")
-        XCTAssertEqual(decoded.name, "fast-model")
         XCTAssertFalse(decoded.reasoning)
         XCTAssertEqual(decoded.inputModalities, ["text"])
         XCTAssertEqual(decoded.contextWindow, 200_000)
@@ -171,7 +167,7 @@ final class OpenAPPCoreTests: XCTestCase {
     }
 
     func testProviderConfigurationDefaults() {
-        let model = ModelConfiguration(id: "test-model")
+        let model = ModelSpec(id: "test-model")
         let provider = AnthropicProvider(
             baseURL: "https://api.example.com",
             apiKey: "test-key",
@@ -188,8 +184,8 @@ final class OpenAPPCoreTests: XCTestCase {
 
     func testProviderMultipleModels() {
         let models = [
-            ModelConfiguration(id: "fast-model", maxTokens: 4096),
-            ModelConfiguration(id: "big-model", maxTokens: 64_000),
+            ModelSpec(id: "fast-model", maxTokens: 4096),
+            ModelSpec(id: "big-model", maxTokens: 64_000),
         ]
         let provider = AnthropicProvider(
             baseURL: "https://api.example.com",
@@ -356,8 +352,8 @@ final class OpenAPPCoreTests: XCTestCase {
             baseURL: "https://api.example.com",
             apiKey: "key",
             models: [
-                ModelConfiguration(id: "model-a"),
-                ModelConfiguration(id: "model-b", maxTokens: 4096)
+                ModelSpec(id: "model-a"),
+                ModelSpec(id: "model-b", maxTokens: 4096)
             ]
         )
         await central.register(name: "test", provider: provider)
@@ -368,8 +364,7 @@ final class OpenAPPCoreTests: XCTestCase {
         // Resolve existing model
         let resolved = await central.resolve(modelReference: "test/model-b")
         XCTAssertNotNil(resolved)
-        XCTAssertEqual(resolved?.model.id, "model-b")
-        XCTAssertEqual(resolved?.model.maxTokens, 4096)
+        XCTAssertEqual(resolved?.modelId, "model-b")
 
         // Resolve non-existent model
         let missing = await central.resolve(modelReference: "test/model-z")
@@ -385,7 +380,7 @@ final class OpenAPPCoreTests: XCTestCase {
         await central.register(name: "temp", provider: AnthropicProvider(
             baseURL: "https://api.example.com",
             apiKey: "key",
-            models: [ModelConfiguration(id: "model-a")]
+            models: [ModelSpec(id: "model-a")]
         ))
         let namesAfterRegister = await central.registeredNames
         XCTAssertEqual(namesAfterRegister.count, 1)
@@ -400,12 +395,12 @@ final class OpenAPPCoreTests: XCTestCase {
         await central.register(name: "acme", provider: AnthropicProvider(
             baseURL: "https://api.example.com",
             apiKey: "key",
-            models: [ModelConfiguration(id: "default-model")]
+            models: [ModelSpec(id: "default-model")]
         ))
 
         let resolved = await central.resolveDefault()
         XCTAssertNotNil(resolved)
-        XCTAssertEqual(resolved?.model.id, "default-model")
+        XCTAssertEqual(resolved?.modelId, "default-model")
     }
 
     func testProviderCentralInvalidFormat() async {
@@ -415,58 +410,54 @@ final class OpenAPPCoreTests: XCTestCase {
         XCTAssertNil(result)
     }
 
-    // MARK: - ModelProviderCentral.ModelPolicy
+    // MARK: - ModelProviderCentral Resolution
 
-    func testModelPolicyResolvePrimary() async {
+    func testModelResolve() async {
         let central = ModelProviderCentral()
         await central.register(name: "acme", provider: AnthropicProvider(
             baseURL: "https://api.example.com",
             apiKey: "key",
             models: [
-                ModelConfiguration(id: "fast"),
-                ModelConfiguration(id: "smart")
+                ModelSpec(id: "fast"),
+                ModelSpec(id: "smart")
             ]
         ))
 
-        let selector = ModelProviderCentral.ModelPolicy(primary: "acme/smart", fallbacks: ["acme/fast"])
-        let resolved = await central.resolve(modelReference: selector.primary)
+        let resolved = await central.resolve(modelReference: "acme/smart")
         XCTAssertNotNil(resolved)
-        XCTAssertEqual(resolved?.model.id, "smart")
+        XCTAssertEqual(resolved?.modelId, "smart")
     }
 
-    func testModelPolicyFallback() async {
+    func testModelResolveNotFound() async {
         let central = ModelProviderCentral()
-        await central.register(name: "acme", provider: AnthropicProvider(
-            baseURL: "https://api.example.com",
-            apiKey: "key",
-            models: [ModelConfiguration(id: "fast")]
-        ))
-
-        // Primary doesn't exist, fallback should work
-        let selector = ModelProviderCentral.ModelPolicy(primary: "acme/nonexistent", fallbacks: ["acme/fast"])
-        // Primary fails, try fallbacks
-        var resolved = await central.resolve(modelReference: selector.primary)
-        if resolved == nil {
-            for fallback in selector.fallbacks {
-                resolved = await central.resolve(modelReference: fallback)
-                if resolved != nil { break }
-            }
-        }
-        XCTAssertNotNil(resolved)
-        XCTAssertEqual(resolved?.model.id, "fast")
-    }
-
-    func testModelPolicyNothingResolvable() async {
-        let central = ModelProviderCentral()
-        let selector = ModelProviderCentral.ModelPolicy(primary: "nope/nope", fallbacks: ["also/nope"])
-        var resolved = await central.resolve(modelReference: selector.primary)
-        if resolved == nil {
-            for fallback in selector.fallbacks {
-                resolved = await central.resolve(modelReference: fallback)
-                if resolved != nil { break }
-            }
-        }
+        let resolved = await central.resolve(modelReference: "nope/nope")
         XCTAssertNil(resolved)
+    }
+
+    // MARK: - ModelPolicy
+
+    func testModelPolicyInit() {
+        let policy = ModelPolicy(
+            primary: "provider1/model-a",
+            fallbacks: ["provider1/model-b", "provider2/model-c"]
+        )
+        XCTAssertEqual(policy.primary, "provider1/model-a")
+        XCTAssertEqual(policy.fallbacks.count, 2)
+        XCTAssertEqual(policy.fallbacks[0], "provider1/model-b")
+        XCTAssertEqual(policy.fallbacks[1], "provider2/model-c")
+    }
+
+    func testModelPolicyConvenienceInit() {
+        let policy = ModelPolicy("provider/model")
+        XCTAssertEqual(policy.primary, "provider/model")
+        XCTAssertTrue(policy.fallbacks.isEmpty)
+    }
+
+    func testModelPolicyCodable() throws {
+        let policy = ModelPolicy(primary: "p/model-a", fallbacks: ["p/model-b"])
+        let data = try JSONEncoder().encode(policy)
+        let decoded = try JSONDecoder().decode(ModelPolicy.self, from: data)
+        XCTAssertEqual(decoded, policy)
     }
 
     // MARK: - ToolCentral
@@ -489,7 +480,7 @@ final class OpenAPPCoreTests: XCTestCase {
             provider: AnthropicProvider(
                 baseURL: "https://api.example.com",
                 apiKey: "key",
-                models: [ModelConfiguration(id: "test-model")]
+                models: [ModelSpec(id: "test-model")]
             )
         )
 
@@ -498,13 +489,13 @@ final class OpenAPPCoreTests: XCTestCase {
             name: "test",
             profile: AIAgentProfile(identity: "Test"),
             providerCentral: providerCentral,
-            modelPolicy: ModelProviderCentral.ModelPolicy(primary: "testProvider/test-model"),
+            modelPolicy: ModelPolicy(primary: "testProvider/test-model"),
             sessionStorage: InMemorySessionStorage()
         )
 
         let resolved = await agent.resolveProvider()
         XCTAssertNotNil(resolved)
-        XCTAssertEqual(resolved?.model.id, "test-model")
+        XCTAssertEqual(resolved?.modelId, "test-model")
     }
 
     func testAgentResolveProviderFallsBackToDefault() async {
@@ -515,11 +506,11 @@ final class OpenAPPCoreTests: XCTestCase {
             provider: AnthropicProvider(
                 baseURL: "https://api.example.com",
                 apiKey: "key",
-                models: [ModelConfiguration(id: "fallback-model")]
+                models: [ModelSpec(id: "fallback-model")]
             )
         )
 
-        // AIAgent without modelPolicy — should fall back to central's default
+        // AIAgent without defaultModel — should fall back to central's default
         let agentCentral = AIAgentCentral()
         let agent = await agentCentral.create(
             name: "test",
@@ -930,5 +921,201 @@ final class OpenAPPCoreTests: XCTestCase {
         // Cancel should not crash even when nothing is running
         session.cancel()
         XCTAssertFalse(session.isRunning)
+    }
+
+    func testExecutorTracksAndCancelsActiveRun() async throws {
+        let provider = BlockingModelProvider()
+        let providerCentral = ModelProviderCentral()
+        await providerCentral.register(name: "mock", provider: provider)
+
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "test",
+            profile: AIAgentProfile(
+                identity: "Test",
+                autoPersist: false,
+                registerBuiltInTools: false
+            ),
+            providerCentral: providerCentral,
+            modelPolicy: ModelPolicy(primary: "mock/blocking-model"),
+            sessionStorage: InMemorySessionStorage()
+        )
+
+        let session = await agent.createSession(title: "Running")
+        let stream = session.sendMessage("Hello")
+        let drain = Task {
+            for await _ in stream {}
+        }
+
+        await provider.waitUntilStarted()
+        XCTAssertTrue(session.isRunning)
+
+        session.cancel()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertFalse(session.isRunning)
+        XCTAssertFalse(session.uiState.isStreaming)
+        drain.cancel()
+    }
+
+    func testExecutorSetsUIErrorWhenProviderFails() async {
+        let provider = FailingModelProvider(error: ModelError.invalidResponse)
+        let providerCentral = ModelProviderCentral()
+        await providerCentral.register(name: "mock", provider: provider)
+
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "test",
+            profile: AIAgentProfile(
+                identity: "Test",
+                autoPersist: false,
+                registerBuiltInTools: false
+            ),
+            providerCentral: providerCentral,
+            modelPolicy: ModelPolicy(primary: "mock/failing-model"),
+            sessionStorage: InMemorySessionStorage()
+        )
+
+        let session = await agent.createSession(title: "Failing")
+        let stream = session.sendMessage("Hello")
+        var sawError = false
+        for await event in stream {
+            if case .error = event {
+                sawError = true
+            }
+        }
+
+        XCTAssertTrue(sawError)
+        XCTAssertFalse(session.isRunning)
+        XCTAssertFalse(session.uiState.isStreaming)
+        XCTAssertNotNil(session.uiState.lastError)
+    }
+
+    func testToolLoopWarningCompletesStartedToolCall() async {
+        let provider = RepeatingToolCallModelProvider()
+        let providerCentral = ModelProviderCentral()
+        await providerCentral.register(name: "mock", provider: provider)
+
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "test",
+            profile: AIAgentProfile(
+                identity: "Test",
+                maxIterations: 3,
+                autoPersist: false,
+                registerBuiltInTools: false
+            ),
+            providerCentral: providerCentral,
+            modelPolicy: ModelPolicy(primary: "mock/repeating-model"),
+            sessionStorage: InMemorySessionStorage()
+        )
+
+        let session = await agent.createSession(title: "Loop")
+        let stream = session.sendMessage("Loop")
+        var startedCount = 0
+        var completedWarning = false
+        for await event in stream {
+            switch event {
+            case .toolCallStarted:
+                startedCount += 1
+            case .toolCallCompleted(let toolCallId, _):
+                completedWarning = toolCallId == "loop-call"
+            default:
+                break
+            }
+        }
+
+        XCTAssertEqual(startedCount, 3)
+        XCTAssertTrue(completedWarning)
+    }
+}
+
+private final class BlockingModelProvider: ModelProvider, @unchecked Sendable {
+    let name = "mock"
+    let baseURL = ""
+    let apiKey = ""
+    let apiProtocol: APIProtocol = .anthropicMessages
+    let customHeaders: [String: String] = [:]
+    let models = [ModelSpec(id: "blocking-model")]
+    let requestTimeout: TimeInterval = 300
+
+    private let started = ReadySignal()
+
+    func waitUntilStarted() async {
+        await started.wait()
+    }
+
+    func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
+    ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                await started.signal()
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+                continuation.finish(throwing: CancellationError())
+            }
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
+            }
+        }
+    }
+}
+
+private final class FailingModelProvider: ModelProvider, @unchecked Sendable {
+    let name = "mock"
+    let baseURL = ""
+    let apiKey = ""
+    let apiProtocol: APIProtocol = .anthropicMessages
+    let customHeaders: [String: String] = [:]
+    let models = [ModelSpec(id: "failing-model")]
+    let requestTimeout: TimeInterval = 300
+
+    private let error: Error
+
+    init(error: Error) {
+        self.error = error
+    }
+
+    func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
+    ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.finish(throwing: error)
+        }
+    }
+}
+
+private final class RepeatingToolCallModelProvider: ModelProvider, @unchecked Sendable {
+    let name = "mock"
+    let baseURL = ""
+    let apiKey = ""
+    let apiProtocol: APIProtocol = .anthropicMessages
+    let customHeaders: [String: String] = [:]
+    let models = [ModelSpec(id: "repeating-model")]
+    let requestTimeout: TimeInterval = 300
+
+    func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
+    ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let call = AIAgentMessage.ToolCall(
+                id: "loop-call",
+                name: "missing_tool",
+                arguments: ["query": .string("same")]
+            )
+            continuation.yield(.toolCall(call))
+            continuation.yield(.done(stopReason: .toolUse))
+            continuation.finish()
+        }
     }
 }

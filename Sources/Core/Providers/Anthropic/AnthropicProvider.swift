@@ -12,8 +12,9 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
     public let apiKey: String
     public let apiProtocol: APIProtocol
     public let customHeaders: [String: String]
-    public let models: [ModelConfiguration]
+    public let models: [ModelSpec]
     public let requestTimeout: TimeInterval
+    public let defaultRequestMaxTokens: Int
     private let concurrencyLimiter: ConcurrencyLimiter
 
     /// Anthropic API version, managed internally.
@@ -24,17 +25,20 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         apiKey: String,
         apiProtocol: APIProtocol = .anthropicMessages,
         customHeaders: [String: String] = [:],
-        models: [ModelConfiguration],
+        models: [ModelSpec],
         requestTimeout: TimeInterval = 300,
+        defaultRequestMaxTokens: Int = 4096,
         maxConcurrency: Int = 5
     ) {
         precondition(!models.isEmpty, "AnthropicProvider requires at least one model")
+        precondition(defaultRequestMaxTokens > 0, "defaultRequestMaxTokens must be positive")
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.apiProtocol = apiProtocol
         self.customHeaders = customHeaders
         self.models = models
         self.requestTimeout = requestTimeout
+        self.defaultRequestMaxTokens = defaultRequestMaxTokens
         self.concurrencyLimiter = ConcurrencyLimiter(limit: maxConcurrency)
     }
 
@@ -50,14 +54,19 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         messages: [AIAgentMessage],
         system: [ContentOrCacheControl<SystemPrompt>],
         tools: [ContentOrCacheControl<any ToolProtocol>],
-        model: ModelConfiguration
+        modelId: String
     ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
                 await self.concurrencyLimiter.wait()
                 do {
-                    let request = try self.buildRequest(messages: messages, system: system, tools: tools, model: model)
-                    Logger.info("Anthropic", "streamCompletion: starting, model=\(model.id)")
+                    guard let spec = self.modelSpec(for: modelId) else {
+                        throw ModelError.providerError("Model '\(modelId)' not found in provider '\(self.name)'")
+                    }
+                    try Task.checkCancellation()
+                    let requestMaxTokens = min(spec.maxTokens, self.defaultRequestMaxTokens)
+                    let request = try self.buildRequest(messages: messages, system: system, tools: tools, modelId: modelId, maxTokens: requestMaxTokens)
+                    Logger.info("Anthropic", "streamCompletion: starting, model=\(modelId)")
 
                     if #available(iOS 15.0, macOS 12.0, *) {
                         Logger.debug("Anthropic", "streamCompletion: using bytes streaming (iOS 15+)")
@@ -70,6 +79,9 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
                     continuation.finish(throwing: error)
                 }
                 await self.concurrencyLimiter.signal()
+            }
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
             }
         }
     }
@@ -101,6 +113,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         var activeToolCalls: [Int: (id: String, name: String, jsonAccumulator: String)] = [:]
 
         for try await line in bytes.lines {
+            try Task.checkCancellation()
             if let sseEvent = parser.processLine(line) {
                 for providerEvent in AnthropicMapper.parseSSEEvent(
                     sseEvent, activeToolCalls: &activeToolCalls) {
@@ -133,10 +146,16 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: delegateQueue)
         let task = session.dataTask(with: request)
         delegate.task = task
-        task.resume()
 
-        await delegate.waitUntilFinished()
-        session.finishTasksAndInvalidate()
+        await withTaskCancellationHandler {
+            task.resume()
+            await delegate.waitUntilFinished()
+            session.finishTasksAndInvalidate()
+        } onCancel: {
+            task.cancel()
+            session.invalidateAndCancel()
+            delegate.cancel()
+        }
     }
 
     // MARK: - Private
@@ -150,7 +169,8 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         messages: [AIAgentMessage],
         system: [ContentOrCacheControl<SystemPrompt>],
         tools: [ContentOrCacheControl<any ToolProtocol>],
-        model: ModelConfiguration
+        modelId: String,
+        maxTokens: Int
     ) throws -> URLRequest {
         let effectiveBaseURL = baseURL.isEmpty
             ? "https://api.anthropic.com"
@@ -184,8 +204,8 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         let messagesJSON = try JSONSerialization.jsonObject(with: messagesData)
 
         var body: [String: Any] = [
-            "model": model.id,
-            "max_tokens": model.maxTokens,
+            "model": modelId,
+            "max_tokens": maxTokens,
             "stream": true,
             "messages": messagesJSON
         ]
@@ -202,7 +222,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         // Log the full request details
-        Logger.debug("Anthropic", "buildRequest: url=\(url.absoluteString), model=\(model.id), maxTokens=\(model.maxTokens), messageCount=\(messages.count), systemSegments=\(system.count), toolCount=\(tools.count)")
+        Logger.debug("Anthropic", "buildRequest: url=\(url.absoluteString), model=\(modelId), maxTokens=\(maxTokens), messageCount=\(messages.count), systemSegments=\(system.count), toolCount=\(tools.count)")
         if Logger.isEnabled {
             if let bodyData = request.httpBody,
                let jsonObj = try? JSONSerialization.jsonObject(with: bodyData),
@@ -228,9 +248,7 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
     private var errorBody = Data()
     private var isErrorResponse = false
 
-    private let finishLock = NSLock()
-    private var _didFinish = false
-    private var _finishContinuation: CheckedContinuation<Void, Never>?
+    private let finishSignal = ReadySignal()
 
     var task: URLSessionDataTask?
 
@@ -240,15 +258,13 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
 
     /// Awaitable gate — resolves when the delegate receives `didCompleteWithError`.
     func waitUntilFinished() async {
-        finishLock.lock()
-        if _didFinish {
-            finishLock.unlock()
-            return
-        }
-        await withCheckedContinuation { continuation in
-            _finishContinuation = continuation
-            finishLock.unlock()
-        }
+        await finishSignal.wait()
+    }
+
+    func cancel() {
+        task?.cancel()
+        continuation.finish(throwing: AIAgentError.cancelled)
+        Task { await finishSignal.signal() }
     }
 
     // MARK: URLSessionDataDelegate
@@ -276,6 +292,7 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
         guard let text = String(data: data, encoding: .utf8) else { return }
         let lines = text.components(separatedBy: "\n")
         for line in lines {
+            guard dataTask.state != .canceling else { return }
             if let sseEvent = parser.processLine(line) {
                 for providerEvent in AnthropicMapper.parseSSEEvent(
                     sseEvent, activeToolCalls: &activeToolCalls) {
@@ -304,11 +321,6 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
             }
             continuation.finish()
         }
-        finishLock.lock()
-        _didFinish = true
-        let cont = _finishContinuation
-        _finishContinuation = nil
-        finishLock.unlock()
-        cont?.resume()
+        Task { await finishSignal.signal() }
     }
 }

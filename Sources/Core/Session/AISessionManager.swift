@@ -83,7 +83,9 @@ public final class AISessionManager: @unchecked Sendable {
     @discardableResult
     public func createSession(
         title: String = "New Chat",
-        toolPolicy: ToolCentral.ToolPolicy? = nil
+        toolPolicy: ToolCentral.ToolPolicy? = nil,
+        provider: (any ModelProvider)? = nil,
+        modelId: String? = nil
     ) async -> AISession {
         let mask = agent?.buildMask()
 
@@ -108,12 +110,14 @@ public final class AISessionManager: @unchecked Sendable {
             id: sessionId,
             title: title,
             agentMask: mask,
-            installedTools: installedTools
+            installedTools: installedTools,
+            provider: provider,
+            modelId: modelId
         )
         session.toolPolicy = toolPolicy
 
         sessions[session.id] = session
-        Logger.info("AISessionManager", "createSession: id=\(session.id), title=\"\(title)\", installedTools=\(installedTools.count)")
+        Logger.info("AISessionManager", "createSession: id=\(session.id), title=\"\(title)\", modelId=\(modelId ?? "nil"), installedTools=\(installedTools.count)")
         return session
     }
 
@@ -138,6 +142,10 @@ public final class AISessionManager: @unchecked Sendable {
     public func restoreAll() async throws {
         let snapshots = try await storage.loadAll()
         let mask = agent?.buildMask()
+
+        // Resolve provider + model from agent for restored sessions
+        let resolved = await agent?.resolveProvider()
+
         for snapshot in snapshots {
             var installedTools: [String: any ToolProtocol] = [:]
             if let registry = mask?.toolCentral ?? agent?.toolCentral {
@@ -148,8 +156,10 @@ public final class AISessionManager: @unchecked Sendable {
                 id: snapshot.id,
                 title: snapshot.title,
                 agentMask: mask,
-                messages: snapshot.messages,
                 installedTools: installedTools,
+                messages: snapshot.messages,
+                provider: resolved?.provider,
+                modelId: resolved?.modelId,
                 createdAt: snapshot.createdAt,
                 updatedAt: snapshot.updatedAt
             )

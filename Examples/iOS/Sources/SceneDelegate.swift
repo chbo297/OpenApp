@@ -7,7 +7,8 @@ import UIKit
 
 class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
-    var window: UIWindow?
+    var hostWindow: UIWindow?
+    var openAPPOverlay: OpenAPPOverlay?
     var agent: AIAgent?
 
     func scene(
@@ -20,26 +21,25 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         Logger.isEnabled = true
         Logger.minimumLevel = .debug
 
-        let chatVC = ChatViewController()
-        chatVC.title = "OpenAPP Demo"
-        let navController = UINavigationController(rootViewController: chatVC)
+        // 1) Host app's own window (any normal iOS app would do this).
+        let host = UIWindow(windowScene: windowScene)
+        host.rootViewController = HostTabBarController()
+        host.makeKeyAndVisible()
+        self.hostWindow = host
 
-        let window = UIWindow(windowScene: windowScene)
-        window.rootViewController = navController
-        window.makeKeyAndVisible()
-        self.window = window
-
+        // 2) SDK chat UI – mounted in its own independent overlay window.
         Task { @MainActor in
             guard DemoConfig.loaded != nil else {
-                showAlert(
-                    on: chatVC,
-                    title: "缺少配置文件",
-                    message: "未找到 config.json。\n\n请在 Resources/ 目录下执行:\ncp config.json.example config.json\n然后填入你的配置并重新运行。"
-                )
+                if let presenter = host.rootViewController {
+                    showAlert(
+                        on: presenter,
+                        title: "缺少配置文件",
+                        message: "未找到 config.json。\n\n请在 Resources/ 目录下执行:\ncp config.json.example config.json\n然后填入你的配置并重新运行。"
+                    )
+                }
                 return
             }
 
-            // Register all providers from config into ModelProviderCentral
             for entry in DemoConfig.allProviders {
                 await ModelProviderCentral.`default`.register(
                     name: entry.name,
@@ -63,14 +63,15 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             )
             self.agent = agent
 
-            let chatSession = await agent.createSession(title: "Chat")
-            chatVC.agent = agent
-            chatVC.switchSession(to: chatSession.id)
+            self.openAPPOverlay = await OpenAPPOverlay.start(
+                in: windowScene,
+                agent: agent
+            )
         }
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
-        // Persist all sessions when going to background
+        // Persist all sessions when going to background.
         Task {
             try? await agent?.sessionManager.saveAll()
         }

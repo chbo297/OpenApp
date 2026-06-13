@@ -35,9 +35,10 @@ public final class AIAgent: @unchecked Sendable {
     @Locked
     public var toolCentral: ToolCentral
 
-    /// Model selection for this agent. If nil, falls back to providerCentral.defaultPolicy().
+    /// Model selection policy for this agent (e.g., primary + fallbacks in "providerName/modelId" format).
+    /// If nil, falls back to providerCentral.resolveDefault().
     @Locked
-    public var modelPolicy: ModelProviderCentral.ModelPolicy?
+    public var modelPolicy: ModelPolicy?
 
     /// Provider central for this agent. Defaults to `.default` if not overridden at init.
     @Locked
@@ -73,8 +74,6 @@ public final class AIAgent: @unchecked Sendable {
             profile: self.profile,
             toolPolicy: self.toolPolicy,
             toolCentral: self.toolCentral,
-            modelPolicy: self.modelPolicy,
-            providerCentral: self.providerCentral,
             agent: self
         )
     }
@@ -89,7 +88,7 @@ public final class AIAgent: @unchecked Sendable {
     ///   - profile: AIAgent profile (prompts, identity, memory, tool settings).
     ///   - toolCentral: Tool registry for this agent. Default: `.default`.
     ///   - providerCentral: Provider registry for this agent. Default: `.default`.
-    ///   - modelPolicy: Model selection for this agent. Default: nil (uses providerCentral default).
+    ///   - modelPolicy: Model selection policy (primary + fallbacks). Default: nil.
     ///   - memoryStorage: Storage backend for long-term memory. Default: FileMemoryStorage.
     ///   - sessionStorage: Storage backend for session persistence. Default: FileSessionStorage.
     ///   - skillsManager: Skills manager. Default: auto-configured.
@@ -98,7 +97,7 @@ public final class AIAgent: @unchecked Sendable {
         profile: AIAgentProfile = AIAgentProfile(),
         toolCentral: ToolCentral = .`default`,
         providerCentral: ModelProviderCentral = .`default`,
-        modelPolicy: ModelProviderCentral.ModelPolicy? = nil,
+        modelPolicy: ModelPolicy? = nil,
         toolPolicy: ToolCentral.ToolPolicy? = nil,
         memoryStorage: any MemoryStorage = FileMemoryStorage(),
         sessionStorage: any SessionStorage = FileSessionStorage(),
@@ -118,7 +117,7 @@ public final class AIAgent: @unchecked Sendable {
         // Wire back-references
         self.sessionManager.agent = self
 
-        Logger.info("AIAgent", "init: id=\(id), modelPolicy=\(modelPolicy?.primary ?? "nil"), promptBuilders=\(profile.promptBuilders.count), identity=\(profile.identity.isEmpty ? "(none)" : "\(profile.identity.count) chars"), maxIterations=\(profile.maxIterations), autoPersist=\(profile.autoPersist), memory=(longTerm=\(profile.memoryConfig.longTermEnabled), hot=\(profile.memoryConfig.hotMemoryEnabled), maxEntries=\(profile.memoryConfig.longTermMaxEntries))")
+        Logger.info("AIAgent", "init: id=\(id), modelPolicy=\(modelPolicy.map { "\($0.primary) +\($0.fallbacks.count) fallbacks" } ?? "nil"), promptBuilders=\(profile.promptBuilders.count), identity=\(profile.identity.isEmpty ? "(none)" : "\(profile.identity.count) chars"), maxIterations=\(profile.maxIterations), autoPersist=\(profile.autoPersist), memory=(longTerm=\(profile.memoryConfig.longTermEnabled), hot=\(profile.memoryConfig.hotMemoryEnabled), maxEntries=\(profile.memoryConfig.longTermMaxEntries))")
 
         // Auto-register built-in tools
         if profile.registerBuiltInTools {
@@ -135,27 +134,15 @@ public final class AIAgent: @unchecked Sendable {
 
     // MARK: - Provider Resolution
 
-    /// Resolve the model provider and model to use for requests.
+    /// Resolve the model provider and model ID to use for requests.
     ///
     /// Resolution order:
-    /// 1. `modelPolicy` against `providerCentral` (primary then fallbacks)
-    /// 2. `providerCentral.defaultPolicy()` — ordered by APIProtocol case declaration
-    /// 3. `providerCentral.resolveDefault()` as last resort
-    public func resolveProvider() async -> (provider: any ModelProvider, model: ModelConfiguration)? {
-        var selector = modelPolicy
-        if selector == nil {
-            selector = await providerCentral.defaultPolicy()
-        }
-        if let selector {
-            if let result = await providerCentral.resolve(modelReference: selector.primary) {
-                return result
-            }
-            for fallback in selector.fallbacks {
-                if let result = await providerCentral.resolve(modelReference: fallback) {
-                    return result
-                }
-            }
-            Logger.warning("AIAgent", "ModelPolicy could not resolve primary '\(selector.primary)' or fallbacks from ModelProviderCentral")
+    /// 1. `modelPolicy.primary` against `providerCentral`
+    /// 2. `providerCentral.resolveDefault()` as fallback
+    public func resolveProvider() async -> (provider: any ModelProvider, modelId: String)? {
+        if let ref = modelPolicy?.primary,
+           let result = await providerCentral.resolve(modelReference: ref) {
+            return result
         }
         return await providerCentral.resolveDefault()
     }
@@ -231,14 +218,29 @@ public final class AIAgent: @unchecked Sendable {
     @discardableResult
     public func createSession(
         title: String = "New Chat",
+        modelReference: String? = nil,
         toolPolicy: ToolCentral.ToolPolicy? = nil
     ) async -> AISession {
         // Wait for built-in tool registration to complete
         await ensureReady()
 
+        // Resolve provider + model: prefer explicit modelReference, then agent's modelPolicy.primary
+        let ref = modelReference ?? modelPolicy?.primary
+        var resolvedProvider: (any ModelProvider)?
+        var resolvedModelId: String?
+        if let ref, let result = await providerCentral.resolve(modelReference: ref) {
+            resolvedProvider = result.provider
+            resolvedModelId = result.modelId
+        } else if let result = await providerCentral.resolveDefault() {
+            resolvedProvider = result.provider
+            resolvedModelId = result.modelId
+        }
+
         let session = await sessionManager.createSession(
             title: title,
-            toolPolicy: toolPolicy
+            toolPolicy: toolPolicy,
+            provider: resolvedProvider,
+            modelId: resolvedModelId
         )
         delegate?.aiAgent(self, didCreateSession: session)
         return session

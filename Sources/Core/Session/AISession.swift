@@ -28,6 +28,12 @@ public final class AISession: @unchecked Sendable {
     /// Also carries a weak back-reference to the source AIAgent via `agentMask.agent`.
     public let agentMask: AIAgentMask?
 
+    /// The model provider for this session. Set at creation time.
+    public let provider: (any ModelProvider)?
+
+    /// The model ID for this session (e.g., "Claude Opus 4.6"). Set at creation time.
+    public let modelId: String?
+
     @Locked
     public private(set) var installedTools: [String: any ToolProtocol]
 
@@ -76,8 +82,10 @@ public final class AISession: @unchecked Sendable {
     public init(id: String,
          title: String = "New Chat",
          agentMask: AIAgentMask? = nil,
-         messages: [AIAgentMessage] = [],
          installedTools: [String: any ToolProtocol] = [:],
+         messages: [AIAgentMessage] = [],
+         provider: (any ModelProvider)? = nil,
+         modelId: String? = nil,
          createdAt: Date = Date(),
          updatedAt: Date? = nil,
          delegationDepth: Int = 0) {
@@ -87,6 +95,8 @@ public final class AISession: @unchecked Sendable {
         self._title = TrackedLocked(wrappedValue: title, isEqual: ==)
         self._messages = TrackedLocked(wrappedValue: messages)
         self.agentMask = agentMask
+        self.provider = provider
+        self.modelId = modelId
         self._installedTools = Locked(wrappedValue: installedTools)
         self._toolPolicy = Locked(wrappedValue: nil)
         self.uiState = SessionUIState()

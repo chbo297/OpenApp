@@ -44,38 +44,37 @@ public enum APIProtocol: String, Sendable, Codable, CaseIterable {
     case azureOpenaiResponses = "azure-openai-responses"
 }
 
-// MARK: - Model Configuration
+// MARK: - Model Spec
 
-/// Per-model configuration within a provider.
-public struct ModelConfiguration: Sendable, Codable {
+/// Per-model specification within a provider.
+public struct ModelSpec: Sendable, Codable {
     /// Model identifier sent to the API (e.g., "Claude Opus 4.6").
     public var id: String
-    /// Human-friendly short name (e.g., "opus"). Defaults to `id`.
-    public var name: String
     /// Whether this model supports extended thinking / reasoning mode.
     public var reasoning: Bool
     /// Input modalities the model accepts (e.g., ["text", "image"]).
     public var inputModalities: [String]
     /// Total context window size (input + output tokens). Default: 200000.
     public var contextWindow: Int
-    /// Maximum output tokens per single response. Default: 64000.
+    /// Provider/model upper bound for output tokens. Default: 64000.
+    ///
+    /// Providers may choose a lower per-request default so SDK callers do not
+    /// accidentally send an unsupported maximum to every request.
     public var maxTokens: Int
 
     enum CodingKeys: String, CodingKey {
-        case id, name, reasoning, contextWindow, maxTokens
+        case id, reasoning, contextWindow, maxTokens
         case inputModalities = "input"
     }
 
     public init(
         id: String,
-        name: String? = nil,
         reasoning: Bool = false,
         inputModalities: [String] = ["text"],
         contextWindow: Int = 200_000,
         maxTokens: Int = 64_000
     ) {
         self.id = id
-        self.name = name ?? id
         self.reasoning = reasoning
         self.inputModalities = inputModalities
         self.contextWindow = contextWindow
@@ -85,7 +84,6 @@ public struct ModelConfiguration: Sendable, Codable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
-        name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
         reasoning = try container.decodeIfPresent(Bool.self, forKey: .reasoning) ?? false
         inputModalities = try container.decodeIfPresent([String].self, forKey: .inputModalities) ?? ["text"]
         contextWindow = try container.decodeIfPresent(Int.self, forKey: .contextWindow) ?? 200_000
@@ -135,7 +133,7 @@ public protocol ModelProvider: Sendable {
     /// Additional HTTP headers to include in API requests.
     var customHeaders: [String: String] { get }
     /// Available models for this provider. Must not be empty.
-    var models: [ModelConfiguration] { get }
+    var models: [ModelSpec] { get }
     /// API request timeout in seconds. LLM completions are long-running; default 300s.
     var requestTimeout: TimeInterval { get }
 
@@ -144,11 +142,18 @@ public protocol ModelProvider: Sendable {
     ///   - messages: Conversation history.
     ///   - system: System prompt segments with optional cache control markers.
     ///   - tools: Tool definitions with optional cache control markers.
-    ///   - model: The model configuration to use for this request.
+    ///   - modelId: The model identifier to use for this request.
     func streamCompletion(
         messages: [AIAgentMessage],
         system: [ContentOrCacheControl<SystemPrompt>],
         tools: [ContentOrCacheControl<any ToolProtocol>],
-        model: ModelConfiguration
+        modelId: String
     ) -> AsyncThrowingStream<ProviderStreamEvent, Error>
+}
+
+extension ModelProvider {
+    /// Look up a model spec by ID.
+    public func modelSpec(for modelId: String) -> ModelSpec? {
+        models.first { $0.id == modelId }
+    }
 }

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$(jq -r '.tool_input.file_path // empty')\"; case \"$f\" in *Sources/Core/Tools/*Tool.swift) echo '🔔 内置工具改动提醒：检查三处同步 ① AIAgent.registerBuiltInTools() ② AIAgentProfile.defaultBuiltInToolPrompts ③ disabledBuiltInTools 文档' >&2 ;; esac"
+          }
+        ]
+      }
+    ]
+  }
+}

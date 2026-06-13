@@ -17,8 +17,6 @@ public struct AIAgentMask: Sendable {
     public let profile: AIAgentProfile
     public let toolPolicy: ToolCentral.ToolPolicy?
     public let toolCentral: ToolCentral
-    public let modelPolicy: ModelProviderCentral.ModelPolicy?
-    public let providerCentral: ModelProviderCentral
 
     /// Thread-safe weak back-reference to the source AIAgent.
     /// Stored as `let` (reference-type); internal state mutated via WeakLocked's lock.
@@ -31,15 +29,11 @@ public struct AIAgentMask: Sendable {
         profile: AIAgentProfile,
         toolPolicy: ToolCentral.ToolPolicy? = nil,
         toolCentral: ToolCentral,
-        modelPolicy: ModelProviderCentral.ModelPolicy? = nil,
-        providerCentral: ModelProviderCentral,
         agent: AIAgent? = nil
     ) {
         self.profile = profile
         self.toolPolicy = toolPolicy
         self.toolCentral = toolCentral
-        self.providerCentral = providerCentral
-        self.modelPolicy = modelPolicy
         self._agent = WeakLocked(wrappedValue: agent)
     }
 }

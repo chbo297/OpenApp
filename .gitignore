@@ -34,6 +34,7 @@ Pods/
 .LSOverride
 
 # Demo local config (contains API keys)
+Examples/iOS/config.json
 Examples/iOS/Resources/config.json
 
 # Miscellaneous

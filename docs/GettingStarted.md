@@ -1,221 +1,161 @@
 # Getting Started
 
-This guide walks you through installing OpenAPP, configuring a provider, creating your first session, and sending a message.
+This guide follows the current package shape: one SwiftPM product, one Swift module, imported as `OpenAPP`.
 
 ## Prerequisites
 
 - Xcode 15 or later
-- Swift 5.9 or later
-- An LLM API key (the examples below use Anthropic, but any provider works)
-- iOS 15+ or macOS 12+ deployment target
+- Swift 5.10 or later
+- iOS 13+ or macOS 12+
+- An LLM API key if you use the built-in `AnthropicProvider`
 
 ## Installation
 
 ### Swift Package Manager
 
-In Xcode, go to **File > Add Package Dependencies...** and enter:
-
-```
-https://github.com/anthropics/OpenAPP.git
-```
-
-Select the modules you need:
-
-- **OpenAPPCore** -- agent loop, providers, tools, sessions (Foundation only)
-- **OpenAPPUI** -- UIKit chat components (iOS only)
-
-Or add the dependency directly in `Package.swift`:
+Add the package and depend on the `OpenAPP` product:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/anthropics/OpenAPP.git", from: "1.0.0")
+    .package(url: "https://github.com/chbo297/OpenAPP.git", from: "0.1.0")
 ],
 targets: [
     .target(
         name: "YourApp",
         dependencies: [
-            .product(name: "OpenAPPCore", package: "OpenAPP"),
-            .product(name: "OpenAPPUI", package: "OpenAPP"),
+            .product(name: "OpenAPP", package: "OpenAPP")
         ]
     )
 ]
 ```
 
+Then import:
+
+```swift
+import OpenAPP
+```
+
 ### CocoaPods
 
-Add to your `Podfile`:
-
 ```ruby
-pod 'OpenAPP/Core', '~> 1.0'
-pod 'OpenAPP/UI', '~> 1.0'   # optional
+pod 'OpenAPP', '~> 0.1'
 ```
 
-Then run:
+CocoaPods integration is currently iOS-focused. Swift Package Manager is the recommended integration path when you need macOS.
 
-```bash
-pod install
-```
+## Register a Provider
 
-Open the generated `.xcworkspace` file.
-
----
-
-## Creating a Provider
-
-A provider connects OpenAPP to an LLM backend. The framework ships with `AnthropicProvider`:
+`ModelProviderCentral` stores providers by name. Model references use the `"providerName/modelId"` format.
 
 ```swift
-import OpenAPPCore
+import OpenAPP
 
-let configuration = ProviderConfiguration(
-    apiKey: "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx",
-    model: "claude-sonnet-4-20250514",
-    maxTokens: 4096
-)
+let providerCentral = ModelProviderCentral()
 
-let provider = AnthropicProvider(configuration: configuration)
-```
-
-`ProviderConfiguration` also accepts optional parameters:
-
-```swift
-let configuration = ProviderConfiguration(
-    apiKey: "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx",
-    model: "claude-sonnet-4-20250514",
-    maxTokens: 4096,
-    baseURL: URL(string: "https://api.anthropic.com")!,
-    defaultHeaders: ["anthropic-beta": "prompt-caching-2024-07-31"]
+await providerCentral.register(
+    name: "anthropic",
+    provider: AnthropicProvider(
+        baseURL: "https://api.anthropic.com",
+        apiKey: "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx",
+        models: [
+            ModelSpec(
+                id: "claude-sonnet-4-6",
+                contextWindow: 200_000,
+                maxTokens: 64_000
+            )
+        ]
+    )
 )
 ```
 
-> **Tip:** Never hard-code API keys in source. Load them from the keychain, environment variables, or a secure configuration file.
+Never hard-code production API keys in source. Load them from Keychain, your server, or a local config file excluded from Git.
 
----
+## Create an Agent and Session
 
-## Creating a Session Manager
-
-The `AISessionManager` is responsible for creating, resuming, and persisting sessions:
+`AIAgent` is created through `AIAgentCentral`. The agent owns provider selection, tool registration, memory, skills, and session lifecycle.
 
 ```swift
-let manager = AISessionManager(
-    provider: provider,
-    storage: InMemorySessionStorage()   // default; swap for your own
-)
-```
-
-You typically create one manager per provider and hold it for the lifetime of your app.
-
----
-
-## Creating a Session and Sending a Message
-
-```swift
-// Create a new session with a system prompt
-let session = try await manager.createSession(
-    systemPrompt: "You are a helpful coding assistant."
+let agent = await AIAgentCentral.default.create(
+    name: "main",
+    profile: AIAgentProfile(
+        identity: "You are a helpful assistant.",
+        additionalPromptBuilders: [
+            PromptBuilder("Be concise and honest when uncertain.")
+        ]
+    ),
+    providerCentral: providerCentral,
+    modelPolicy: ModelPolicy(primary: "anthropic/claude-sonnet-4-6"),
+    sessionStorage: InMemorySessionStorage()
 )
 
-// Send a user message -- returns an AsyncStream of AIAgentEvent
-let events = session.sendMessage("Explain the difference between a struct and a class in Swift.")
+let session = await agent.createSession(title: "First chat")
 ```
 
-`sendMessage(_:)` returns immediately with an `AsyncStream<AIAgentEvent>`. The agent loop runs in the background, streaming events as they arrive.
-
----
-
-## Handling the AIAgentEvent Stream
-
-Iterate over the stream with `for await`:
+## Send a Message
 
 ```swift
+let events = session.sendMessage("Explain Swift actors in one paragraph.")
+
 for await event in events {
     switch event {
-    case .textDelta(let text):
-        // Append text to the UI in real time
-        print(text, terminator: "")
+    case .started(let turn):
+        print("Turn \(turn) started")
 
-    case .toolUse(let name, let input):
-        // The LLM is calling a tool
-        print("\n[Tool call: \(name)]")
+    case .streamingContent(let delta):
+        print(delta, terminator: "")
 
-    case .toolResult(let name, let output):
-        // A tool returned a result
-        print("[Tool result: \(name) -> \(output)]")
+    case .toolCallStarted(let call):
+        print("\nTool call: \(call.name)")
 
-    case .completed(let message):
-        // The assistant turn is finished
-        print("\n--- Turn complete ---")
-        print("Full response: \(message.content)")
+    case .toolCallCompleted(let toolCallId, _):
+        print("\nTool completed: \(toolCallId)")
+
+    case .toolCallFailed(_, let name, let error):
+        print("\nTool failed: \(name): \(error.localizedDescription)")
+
+    case .usage(let inputTokens, let outputTokens):
+        print("\nUsage: \(inputTokens) in, \(outputTokens) out")
+
+    case .completed(let result):
+        print("\nFinal text: \(result.text)")
 
     case .error(let error):
-        // Handle the error
-        print("Error: \(error.localizedDescription)")
+        print("\nError: \(error.localizedDescription)")
     }
 }
 ```
 
-### Common Patterns
+The same state is also reflected on `session.uiState`, including `isStreaming`, `streamingText`, and `lastError`.
 
-**Collect the full response:**
+## Cancellation
 
-```swift
-var fullText = ""
-for await event in events {
-    if case .textDelta(let text) = event {
-        fullText += text
-    }
-}
-print(fullText)
-```
-
-**Cancel a running stream:**
+Cancel through the session or by cancelling the task consuming the stream:
 
 ```swift
 let task = Task {
     for await event in session.sendMessage("Tell me a long story.") {
-        // process events
+        // Update UI.
     }
 }
 
-// Later, if the user taps "Stop"
 task.cancel()
+// or:
+session.cancel()
 ```
 
----
+## Running the iOS Demo
 
-## Registering Tools
+The demo app is an Xcode project at `Examples/iOS/OpenAPPDemo.xcodeproj`.
 
-You can register tools when creating a session:
-
-```swift
-let weatherTool = WeatherLookupTool()
-
-let session = try await manager.createSession(
-    systemPrompt: "You are a helpful assistant with access to weather data.",
-    tools: [weatherTool]
-)
+```bash
+cp Examples/iOS/Resources/config.json.example Examples/iOS/config.json
 ```
 
-When the LLM decides to use a tool, the agent loop executes it automatically and feeds the result back. See [Tools](Tools.md) for the full guide.
-
----
-
-## Running the Example App
-
-The repository includes an Example app that demonstrates a complete chat interface. It is built as a Package-internal executable target (`OpenAPPDemoApp`), so no separate Xcode project is needed.
-
-1. Open `Package.swift` in Xcode.
-2. Copy and fill in your config: `cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json`.
-3. Select the `OpenAPPDemoApp` scheme and a simulator or device with iOS 15+.
-4. Build and run.
-
-The example uses `AnthropicProvider` and `ChatViewController` to present a working chat in under 50 lines of code.
-
----
+Fill in `Examples/iOS/config.json`, open the Xcode project, choose an iOS Simulator or device, and run.
 
 ## Next Steps
 
-- [Architecture](Architecture.md) -- understand the layered design
-- [Providers](Providers.md) -- implement a custom LLM provider
-- [Tools](Tools.md) -- build and register agent tools
-- [UI Customization](UICustomization.md) -- theme or replace the chat UI
+- [Architecture](Architecture.md)
+- [Providers](Providers.md)
+- [Tools](Tools.md)
+- [UI Customization](UICustomization.md)

@@ -1,330 +1,221 @@
 # Tools
 
-This guide covers the tool system in OpenAPP: defining tools, describing their schemas, registering them, and managing per-session tool state.
+OpenAPP tools conform to `ToolProtocol`. Tools are registered in `ToolCentral` and copied into each `AISession` when the session is created.
 
-## Tool Protocol
-
-Every tool conforms to `Tool`:
+## ToolProtocol
 
 ```swift
-public protocol Tool: Sendable {
-    /// A JSON Schema description of the tool and its parameters.
-    var schema: ToolSchema { get }
+public protocol ToolProtocol: Sendable {
+    var name: String { get }
+    var description: String { get }
+    var parameters: Tool.Schema { get }
+    var enabled: Bool { get }
+    var group: String { get }
+    var safetyLevel: Tool.SafetyLevel { get }
 
-    /// Execute the tool with the given input and return a result.
-    func execute(input: [String: Any]) async throws -> ToolOutput
+    func execute(
+        arguments: [String: JSONValue],
+        session: AISession
+    ) async throws -> Tool.Output
 }
 ```
 
-The `schema` property tells the LLM what the tool does and what arguments it accepts. When the LLM emits a `tool_use` block, the `AIAgentLoop` calls `execute(input:)` with the parsed arguments and feeds the result back into the conversation.
+The SDK provides defaults for `enabled`, `group`, and `safetyLevel`.
 
----
+## Schemas
 
-## ToolSchema
-
-`ToolSchema` is a Swift representation of a JSON Schema object:
+Tool input is described with `Tool.Schema` and `JSONSchema`:
 
 ```swift
-public struct ToolSchema: Codable, Sendable {
-    public let name: String
-    public let description: String
-    public let inputSchema: InputSchema
-
-    public init(name: String, description: String, inputSchema: InputSchema)
-}
-
-public struct InputSchema: Codable, Sendable {
-    public let type: String                          // always "object"
-    public let properties: [String: PropertySchema]
-    public let required: [String]
-
-    public init(
-        properties: [String: PropertySchema],
-        required: [String] = []
-    )
-}
+let schema = Tool.Schema(
+    properties: [
+        "city": .string(description: "City name, for example San Francisco"),
+        "unit": .string(
+            description: "Temperature unit",
+            enumValues: ["celsius", "fahrenheit"],
+            defaultValue: .string("celsius")
+        )
+    ],
+    required: ["city"]
+)
 ```
 
-### PropertySchema
+Supported schema cases include string, number, integer, boolean, array, and object.
 
-Describes a single property in the tool's input:
-
-```swift
-public struct PropertySchema: Codable, Sendable {
-    public let type: String            // "string", "number", "integer", "boolean", "array", "object"
-    public let description: String?
-    public let enumValues: [String]?   // restrict to a fixed set
-    public let items: PropertySchema?  // for arrays
-    public let properties: [String: PropertySchema]?  // for nested objects
-    public let required: [String]?     // for nested objects
-
-    public init(
-        type: String,
-        description: String? = nil,
-        enumValues: [String]? = nil,
-        items: PropertySchema? = nil,
-        properties: [String: PropertySchema]? = nil,
-        required: [String]? = nil
-    )
-}
-```
-
-These types serialize directly to the JSON Schema format expected by LLM APIs.
-
----
-
-## ToolOutput
-
-The result returned from a tool execution:
+## Outputs
 
 ```swift
-public enum ToolOutput: Sendable {
-    /// A plain text result.
+public enum Tool.Output: Sendable {
     case text(String)
-
-    /// A JSON-encodable result.
-    case json(Encodable & Sendable)
-
-    /// An error message to send back to the LLM.
+    case json(JSONValue)
     case error(String)
-
-    /// An image (base64-encoded data and media type).
-    case image(data: Data, mediaType: String)
 }
 ```
 
-The agent loop converts each `ToolOutput` into a `tool_result` content block and appends it to the message history before the next LLM call.
+The executor converts `Tool.Output` to a string tool result and feeds it back to the model.
 
----
+## Registering Tools
 
-## Registering Tools with ToolRegistry
-
-`ToolRegistry` is a thread-safe container for tools:
+Register shared tools before creating sessions:
 
 ```swift
-let registry = ToolRegistry()
+let toolCentral = ToolCentral()
+await toolCentral.register(WeatherLookupTool())
 
-// Register individual tools
-registry.register(WeatherLookupTool())
-registry.register(CalculatorTool())
-
-// Or register a batch
-registry.register(tools: [WeatherLookupTool(), CalculatorTool()])
-```
-
-When creating a session, pass tools directly -- the session builds its own registry internally:
-
-```swift
-let session = try await manager.createSession(
-    systemPrompt: "You are a helpful assistant.",
-    tools: [WeatherLookupTool(), CalculatorTool()]
+let agent = await AIAgentCentral.default.create(
+    name: "main",
+    profile: AIAgentProfile(identity: "You are helpful."),
+    toolCentral: toolCentral,
+    providerCentral: providerCentral,
+    modelPolicy: ModelPolicy(primary: "anthropic/claude-sonnet-4-6")
 )
+
+let session = await agent.createSession()
 ```
 
-### Tool Lookup
+The default `AIAgentProfile` registers built-in tools automatically. Pass `registerBuiltInTools: false` if you want only the tools you register.
 
-During the agent loop, tools are resolved by name:
+## Per-Session Tool Factories
+
+Use a factory when every session needs a fresh tool instance:
 
 ```swift
-// Internal to AIAgentLoop
-if let tool = registry.tool(named: "weather_lookup") {
-    let output = try await tool.execute(input: parsedInput)
+await toolCentral.registerFactory(
+    name: "scratchpad",
+    description: "Store short notes for this session.",
+    parameters: Tool.Schema()
+) {
+    ScratchpadTool()
 }
 ```
 
-If a tool is not found, the loop returns a `tool_result` with an error message so the LLM can recover gracefully.
+Factory-created tools and shared tools are both resolved through `ToolCentral`.
 
----
+## Tool Policies
 
-## Shared Tools vs. Per-Session Tools (ToolFactory)
-
-Some tools are stateless and can be shared across all sessions (e.g., a calculator). Others need per-session state (e.g., a tool that writes to a session-specific scratch pad).
-
-### Shared Tools
-
-Pass instances directly:
+Tool policies narrow the set of tools available to an agent or session:
 
 ```swift
-let calc = CalculatorTool()  // stateless, safe to share
-
-let session1 = try await manager.createSession(
-    systemPrompt: "...",
-    tools: [calc]
+let profile = AIAgentProfile(
+    identity: "You are helpful.",
+    disabledBuiltInTools: ["clipboard", "text_to_speech"]
 )
-let session2 = try await manager.createSession(
-    systemPrompt: "...",
-    tools: [calc]
+
+let session = await agent.createSession(
+    toolPolicy: ToolCentral.ToolPolicy(
+        allowedNames: ["weather_lookup", "todo"],
+        excludedNames: nil
+    )
 )
 ```
 
-### ToolFactory
+Agent-level and session-level policies are applied together.
 
-Use `ToolFactory` when each session needs its own tool instance:
+## Safety Levels
 
 ```swift
-public struct ToolFactory: Sendable {
-    public let name: String
-    public let create: @Sendable () -> Tool
-
-    public init(name: String, create: @escaping @Sendable () -> Tool)
+public enum Tool.SafetyLevel: String, Sendable {
+    case safe
+    case moderate
+    case sensitive
+    case dangerous
 }
 ```
 
-Register factories with the session manager:
+Sensitive and dangerous tools call `AIAgentDelegate` before execution:
 
 ```swift
-let manager = AISessionManager(
-    provider: provider,
-    toolFactories: [
-        ToolFactory(name: "scratchpad") {
-            ScratchpadTool()  // fresh instance per session
-        }
-    ]
-)
+func aiAgent(
+    _ aiAgent: AIAgent,
+    session: AISession,
+    shouldExecuteTool name: String,
+    safetyLevel: Tool.SafetyLevel,
+    arguments: [String: JSONValue]
+) async -> Bool {
+    // Show host app confirmation UI here.
+    true
+}
 ```
 
-When `createSession` is called, the manager invokes each factory and merges the resulting tools with any tools passed directly to the session.
-
----
-
-## SystemPrompt.toolPrompts
-
-If your tools need additional instructions in the system prompt (beyond the JSON Schema), use `SystemPrompt.toolPrompts`:
-
-```swift
-let systemPrompt = SystemPrompt(
-    base: "You are a helpful assistant.",
-    toolPrompts: [
-        "weather_lookup": "When reporting weather, always include the temperature in both Celsius and Fahrenheit.",
-        "calculator": "Show your work step by step before giving the final answer."
-    ]
-)
-
-let session = try await manager.createSession(
-    systemPrompt: systemPrompt,
-    tools: [WeatherLookupTool(), CalculatorTool()]
-)
-```
-
-The session assembles the final system prompt by appending each tool prompt to the base prompt. This keeps tool-specific instructions co-located with tool definitions.
-
----
-
-## Complete Example: Weather Lookup Tool
-
-Below is a full implementation of a tool that fetches current weather data.
-
-### 1. Define the Tool
+## Complete Example
 
 ```swift
 import Foundation
-import OpenAPPCore
+import OpenAPP
 
-public final class WeatherLookupTool: Tool {
-    public var schema: ToolSchema {
-        ToolSchema(
-            name: "weather_lookup",
-            description: "Look up the current weather for a given city.",
-            inputSchema: InputSchema(
-                properties: [
-                    "city": PropertySchema(
-                        type: "string",
-                        description: "The city name, e.g. 'San Francisco'"
-                    ),
-                    "unit": PropertySchema(
-                        type: "string",
-                        description: "Temperature unit",
-                        enumValues: ["celsius", "fahrenheit"]
-                    )
-                ],
-                required: ["city"]
+public struct WeatherLookupTool: ToolProtocol {
+    public let name = "weather_lookup"
+    public let description = "Look up current weather for a city."
+    public let parameters = Tool.Schema(
+        properties: [
+            "city": .string(description: "City name"),
+            "unit": .string(
+                description: "Temperature unit",
+                enumValues: ["celsius", "fahrenheit"],
+                defaultValue: .string("celsius")
             )
-        )
-    }
+        ],
+        required: ["city"]
+    )
+    public let group = "web"
+    public let safetyLevel: Tool.SafetyLevel = .safe
 
     public init() {}
 
-    public func execute(input: [String: Any]) async throws -> ToolOutput {
-        guard let city = input["city"] as? String else {
+    public func execute(
+        arguments: [String: JSONValue],
+        session: AISession
+    ) async throws -> Tool.Output {
+        guard let city = arguments["city"]?.stringValue else {
             return .error("Missing required parameter: city")
         }
 
-        let unit = (input["unit"] as? String) ?? "celsius"
+        let unit = arguments["unit"]?.stringValue ?? "celsius"
 
-        // In production, call a real weather API here.
-        let weather = try await fetchWeather(city: city, unit: unit)
-
-        return .text(
-            "Current weather in \(city): \(weather.temperature)\u{00B0}\(unit == "celsius" ? "C" : "F"), "
-            + "\(weather.condition). Humidity: \(weather.humidity)%."
-        )
+        return .json(.object([
+            "city": .string(city),
+            "unit": .string(unit),
+            "temperature": .number(22),
+            "condition": .string("clear")
+        ]))
     }
-
-    private func fetchWeather(city: String, unit: String) async throws -> WeatherData {
-        // Replace with a real API call
-        let url = URL(string: "https://api.example.com/weather?city=\(city)&unit=\(unit)")!
-        let (data, _) = try await URLSession.shared.data(from: url)
-        return try JSONDecoder().decode(WeatherData.self, from: data)
-    }
-}
-
-private struct WeatherData: Decodable {
-    let temperature: Double
-    let condition: String
-    let humidity: Int
 }
 ```
 
-### 2. Register and Use
+Use it:
 
 ```swift
-import OpenAPPCore
+let toolCentral = ToolCentral()
+await toolCentral.register(WeatherLookupTool())
 
-let provider = AnthropicProvider(configuration: ProviderConfiguration(
-    apiKey: "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx",
-    model: "claude-sonnet-4-20250514",
-    maxTokens: 4096
-))
-
-let manager = AISessionManager(provider: provider)
-
-let session = try await manager.createSession(
-    systemPrompt: "You are a helpful assistant with access to real-time weather data.",
-    tools: [WeatherLookupTool()]
+let agent = await AIAgentCentral.default.create(
+    name: "main",
+    profile: AIAgentProfile(identity: "You can answer weather questions."),
+    toolCentral: toolCentral,
+    providerCentral: providerCentral,
+    modelPolicy: ModelPolicy(primary: "anthropic/claude-sonnet-4-6")
 )
 
-let events = session.sendMessage("What's the weather like in Tokyo right now?")
+let session = await agent.createSession()
 
-for await event in events {
+for await event in session.sendMessage("What is the weather in Tokyo?") {
     switch event {
-    case .textDelta(let text):
-        print(text, terminator: "")
-    case .toolUse(let name, _):
-        print("\n[Calling \(name)...]")
-    case .toolResult(let name, let output):
-        print("[Result from \(name): \(output)]")
-    case .completed:
-        print("\n--- Done ---")
+    case .streamingContent(let delta):
+        print(delta, terminator: "")
+    case .toolCallStarted(let call):
+        print("\nCalling \(call.name)")
+    case .completed(let result):
+        print("\n\(result.text)")
     case .error(let error):
-        print("Error: \(error)")
+        print(error.localizedDescription)
+    default:
+        break
     }
 }
 ```
 
-### 3. What Happens at Runtime
+## Built-In Tools
 
-1. The user asks about Tokyo weather.
-2. The LLM sees the `weather_lookup` tool schema and emits a `tool_use` block with `{"city": "Tokyo"}`.
-3. The `AIAgentLoop` finds `WeatherLookupTool` in the registry and calls `execute(input:)`.
-4. The tool fetches data and returns `.text("Current weather in Tokyo: ...")`.
-5. The loop appends the `tool_result` to the message history and calls the LLM again.
-6. The LLM incorporates the weather data into a natural language response.
-7. The loop emits `.completed`.
+The SDK includes tools for clarification, memory, todos, sandboxed file access, skills, text-to-speech, delegation, session search, clipboard, haptics, app actions/navigation/state, web search, and vision analysis.
 
----
-
-## Next Steps
-
-- [Providers](Providers.md) -- understand the LLM communication layer
-- [Architecture](Architecture.md) -- see how tools fit into the agent loop
-- [UI Customization](UICustomization.md) -- display tool results in the chat UI
+Host app tools such as app actions, app state, web search, and vision analysis require provider implementations supplied by the host app.

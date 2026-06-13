@@ -1,231 +1,169 @@
 # Architecture
 
-This document describes the layered architecture of OpenAPP, the module boundaries between `OpenAPPCore` and `OpenAPPUI`, and how the agent loop drives conversations.
+OpenAPP currently ships as one Swift package product and one Swift module named `OpenAPP`.
 
-## Layer Diagram
+The repository still separates implementation files by responsibility:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        OpenAPPUI                            │
-│  ChatViewController · ChatMessage · ChatMessageCell         │
-├─────────────────────────────────────────────────────────────┤
-│                       OpenAPPCore                           │
-│                                                             │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │                  Session Layer                        │  │
-│  │  AISession · AISessionManager · SessionStorage  │  │
-│  ├───────────────────────────────────────────────────────┤  │
-│  │                   Core Layer                          │  │
-│  │  AIAgentLoop · AIAgentEvent · AIAgentError                  │  │
-│  │  ContentOrCacheControl                                │  │
-│  ├───────────────────────────────────────────────────────┤  │
-│  │                  Tool System                          │  │
-│  │  Tool · ToolSchema · ToolRegistry · ToolFactory  │  │
-│  ├───────────────────────────────────────────────────────┤  │
-│  │                 Provider Layer                        │  │
-│  │  LLMProvider · ProviderConfiguration                  │  │
-│  │  ProviderStreamEvent · AnthropicProvider               │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+```text
+Sources/
+  Core/   Agent loop, sessions, providers, tools, memory, skills
+  UI/     UIKit overlay and chat view controller pieces
 ```
 
-Each layer depends only on the layers below it. `OpenAPPUI` depends on `OpenAPPCore`; `OpenAPPCore` depends only on Foundation.
+Those directories are organizational boundaries inside the same target, not separate importable modules.
 
----
+## Package Layout
+
+```text
+Package.swift
+  product: OpenAPP
+  target:  OpenAPP
+  path:    Sources
+```
+
+Use:
+
+```swift
+import OpenAPP
+```
+
+Do not import `OpenAPPCore` or `OpenAPPUI`; those products do not exist in the current package.
+
+## Runtime Layers
+
+```text
+AIAgent
+  AIAgentProfile
+  ModelPolicy
+  ToolCentral
+  ModelProviderCentral
+  MemoryStore
+  SkillsManager
+  AISessionManager
+    AISession
+      LLMExecutor
+        ModelProvider
+        ToolProtocol
+```
+
+## Agent Layer
+
+`AIAgent` is the facade used by host apps. It owns:
+
+- `AIAgentProfile`: identity, prompt builders, tool prompts, memory config, tool timeout, max iterations
+- `ModelPolicy`: primary and fallback model references in `"provider/model"` format
+- `ToolCentral`: shared tool registry and per-session tool factories
+- `ModelProviderCentral`: provider registry and model resolution
+- `MemoryStore`: long-term and hot memory
+- `SkillsManager`: markdown skill discovery and lifecycle
+- `AISessionManager`: session creation, lookup, persistence, deletion
+
+Create agents through `AIAgentCentral`:
+
+```swift
+let agent = await AIAgentCentral.default.create(
+    name: "main",
+    profile: AIAgentProfile(identity: "You are helpful."),
+    providerCentral: providerCentral,
+    modelPolicy: ModelPolicy(primary: "anthropic/claude-sonnet-4-6")
+)
+```
+
+## Session Layer
+
+`AISession` represents one conversation. It stores:
+
+- `messages: [AIAgentMessage]`
+- resolved `provider` and `modelId`
+- installed per-session tools
+- prompt parts
+- session-level tool policy
+- `SessionUIState`
+- mounted `LLMExecutor`
+
+`sendMessage(_:)` returns `AsyncStream<AIAgentEvent>` and starts the executor.
+
+## Execution Flow
+
+```text
+User text
+  -> AISession.sendMessage
+  -> LLMExecutor.run
+  -> assemble system prompt
+  -> resolve tools
+  -> provider.streamCompletion
+  -> stream text/tool events
+  -> execute requested tools
+  -> append tool results
+  -> loop until end turn or max iterations
+  -> update AISession.messages
+```
+
+`LLMExecutor` handles provider retries, tool safety authorization, tool loop detection, context compression, cancellation, and `SessionUIState` updates.
 
 ## Provider Layer
 
-The provider layer abstracts all LLM communication behind a single protocol.
-
-### LLMProvider
+Providers conform to `ModelProvider`:
 
 ```swift
-public protocol LLMProvider: Sendable {
-    func sendMessage(
-        messages: [Message],
-        system: [ContentOrCacheControl],
-        tools: [ToolSchema],
-        maxTokens: Int
+public protocol ModelProvider: Sendable {
+    var name: String { get }
+    var baseURL: String { get }
+    var apiKey: String { get }
+    var apiProtocol: APIProtocol { get }
+    var customHeaders: [String: String] { get }
+    var models: [ModelSpec] { get }
+    var requestTimeout: TimeInterval { get }
+
+    func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
     ) -> AsyncThrowingStream<ProviderStreamEvent, Error>
 }
 ```
 
-Any backend that can produce a stream of `ProviderStreamEvent` values is a valid provider. The framework ships with `AnthropicProvider`, but adding support for OpenAI, Gemini, or a local model requires only a conforming type.
+The built-in provider is `AnthropicProvider`.
 
-### ProviderConfiguration
+## Tool Layer
 
-A value type that holds connection details such as `apiKey`, `model`, `maxTokens`, `baseURL`, and any provider-specific options. Providers accept this at initialization.
-
-### Streaming
-
-All provider communication is streaming-first. The provider returns an `AsyncThrowingStream<ProviderStreamEvent, Error>` that emits deltas as they arrive from the backend, giving the caller real-time control over rendering.
-
----
-
-## Core Layer
-
-### AIAgentLoop
-
-The `AIAgentLoop` is the engine of the framework. It orchestrates the cycle between the LLM and registered tools:
-
-```
- ┌──────────────┐
- │  User sends   │
- │  a message    │
- └──────┬───────┘
-        ▼
- ┌──────────────┐
- │  AIAgentLoop    │◄──────────────────┐
- │  calls LLM    │                   │
- └──────┬───────┘                   │
-        ▼                           │
- ┌──────────────┐    tool_use?      │
- │  Parse stream │───── yes ────►┌──┴───────────┐
- │  events       │               │  Execute tool │
- └──────┬───────┘               │  via registry  │
-        │ no                    └──┬───────────┘
-        ▼                          │
- ┌──────────────┐      tool result │
- │  Emit         │◄────────────────┘
- │  .completed   │
- └──────────────┘
-```
-
-1. The user sends a message through `AISession`.
-2. `AIAgentLoop` forwards the full message history plus system prompt and tool schemas to the `LLMProvider`.
-3. As stream events arrive, the loop emits `AIAgentEvent.textDelta` for text chunks.
-4. If the LLM emits a `tool_use` block, the loop pauses streaming, looks up the tool in the `ToolRegistry`, executes it, appends the `tool_result` to the message history, and loops back to step 2.
-5. When the LLM finishes without requesting another tool call, the loop emits `AIAgentEvent.completed` and stops.
-
-A configurable maximum iteration count prevents infinite loops.
-
-### AIAgentEvent
-
-An enum delivered through the event stream:
-
-| Case | Payload | Description |
-|---|---|---|
-| `.textDelta` | `String` | Incremental text token |
-| `.toolUse` | `(name: String, input: [String: Any])` | The LLM is invoking a tool |
-| `.toolResult` | `(name: String, output: ToolOutput)` | A tool has returned a result |
-| `.completed` | `AssistantMessage` | The turn is finished |
-| `.error` | `AIAgentError` | A recoverable or fatal error |
-
-### AIAgentError
-
-Typed errors covering provider failures, tool execution failures, iteration limits, cancellation, and decoding issues.
-
-### ContentOrCacheControl
-
-A wrapper enum used in system prompts and messages:
+Tools conform to `ToolProtocol`:
 
 ```swift
-public enum ContentOrCacheControl: Codable, Sendable {
-    case text(String)
-    case cacheControl(String, CachePolicy)
+public protocol ToolProtocol: Sendable {
+    var name: String { get }
+    var description: String { get }
+    var parameters: Tool.Schema { get }
+    var enabled: Bool { get }
+    var group: String { get }
+    var safetyLevel: Tool.SafetyLevel { get }
+
+    func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output
 }
 ```
 
-This enables Anthropic-style prompt caching while remaining provider-agnostic -- providers that do not support cache control simply read the text content.
+`ToolCentral` stores shared tools and factories. When a session is created, the session receives a filtered snapshot of available tools.
 
----
+## UI Layer
 
-## Tool System
+UIKit files live in `Sources/UI` and are compiled when UIKit is available.
 
-### Tool
+Key public types:
 
-```swift
-public protocol Tool: Sendable {
-    var schema: ToolSchema { get }
-    func execute(input: [String: Any]) async throws -> ToolOutput
-}
-```
+- `OpenAPPOverlay`: creates a passthrough overlay window and binds it to an agent/session
+- `OpenAPPWindow`: lets taps outside OpenAPP UI pass through to the host app
+- `OpenAPPViewController`: chat UI backed by `AISession.uiState`
+- `OpenAPPInputBar`, `OpenAPPTextField`, `OpenAPPMenuButton`: input controls
+- `ChatMessage`, `ChatMessageCell`: UI message model and table cell
 
-Each tool declares a JSON Schema describing its parameters and implements `execute(input:)`.
+The UI layer is optional at runtime. Apps can ignore it and build directly against `AISession`.
 
-### ToolSchema
+## Persistence
 
-A Swift representation of a JSON Schema object. It contains the tool `name`, `description`, and a tree of `PropertySchema` nodes describing expected input properties, types, and constraints.
+`SessionStorage` abstracts session persistence. The SDK includes:
 
-### ToolRegistry
+- `InMemorySessionStorage`
+- `FileSessionStorage`
 
-A thread-safe container that holds the set of tools available to an agent loop. Tools are registered by name and looked up during tool-use resolution.
-
-### ToolFactory
-
-A closure-based factory for tools that need per-session state. When a new session is created, `ToolFactory` produces a fresh tool instance, ensuring sessions do not share mutable tool state.
-
----
-
-## Session Layer
-
-### AISession
-
-Represents a single conversation. It owns:
-
-- The message history
-- A reference to the `LLMProvider`
-- A `ToolRegistry` (session-scoped tools merged with shared tools)
-- The system prompt
-
-Its primary API is `sendMessage(_:) -> AsyncStream<AIAgentEvent>`, which feeds the user message into the `AIAgentLoop` and returns the resulting event stream.
-
-### AISessionManager
-
-Manages the lifecycle of multiple sessions:
-
-- `createSession(systemPrompt:tools:)` -- starts a new conversation
-- `resumeSession(id:)` -- restores a session from storage
-- `listSessions()` -- returns metadata for all persisted sessions
-- `deleteSession(id:)` -- removes a session and its stored data
-
-### SessionStorage
-
-A protocol for persistence backends:
-
-```swift
-public protocol SessionStorage: Sendable {
-    func save(session: SessionData) async throws
-    func load(id: SessionID) async throws -> SessionData
-    func list() async throws -> [SessionMetadata]
-    func delete(id: SessionID) async throws
-}
-```
-
-The framework provides a default in-memory implementation. You can supply your own for Core Data, SQLite, the file system, or a remote backend.
-
----
-
-## UI Layer (OpenAPPUI)
-
-`OpenAPPUI` is an optional module that depends on `OpenAPPCore` and UIKit. It provides a turnkey chat interface.
-
-### ChatViewController
-
-A `UIViewController` subclass backed by a `UICollectionView` that renders a conversation. It accepts an `AISession` and subscribes to its event stream automatically. It supports:
-
-- Streaming text rendering with a typing indicator
-- Tool-use status display
-- User message input bar
-- Automatic scrolling and keyboard avoidance
-
-### ChatMessage
-
-A view model that maps `AIAgentEvent` payloads into renderable rows (user bubbles, assistant bubbles, tool indicators, error banners).
-
-### ChatMessageCell
-
-A collection of `UICollectionViewCell` subclasses for the different message types. They are designed to be subclassed or replaced for custom theming.
-
----
-
-## Module Boundaries
-
-| Aspect | OpenAPPCore | OpenAPPUI |
-|---|---|---|
-| **Frameworks** | Foundation | UIKit, OpenAPPCore |
-| **Platforms** | iOS 15+, macOS 12+ | iOS 15+ |
-| **Use case** | Headless agents, server-side, CLI tools, custom UI | Drop-in chat screens |
-| **External deps** | None | None (beyond OpenAPPCore) |
-
-If you only need the agent loop and provider abstraction -- for example in a macOS command-line tool or a SwiftUI app with a fully custom interface -- depend on `OpenAPPCore` alone. Add `OpenAPPUI` when you want a pre-built UIKit chat experience.
+Memory storage is separate and uses `MemoryStorage`, with in-memory and file-backed implementations.

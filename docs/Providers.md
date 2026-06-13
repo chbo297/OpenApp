@@ -1,266 +1,155 @@
 # Providers
 
-This guide covers the `LLMProvider` protocol, its supporting types, and how to implement a custom provider for any LLM backend.
+Providers connect OpenAPP to model backends. The current provider protocol is `ModelProvider`.
 
-## The LLMProvider Protocol
-
-`LLMProvider` is the single abstraction that connects OpenAPP to an LLM service:
+## ModelProvider
 
 ```swift
-public protocol LLMProvider: Sendable {
-    /// Send a conversation to the LLM and receive a stream of events.
-    func sendMessage(
-        messages: [Message],
-        system: [ContentOrCacheControl],
-        tools: [ToolSchema],
-        maxTokens: Int
+public protocol ModelProvider: Sendable {
+    var name: String { get }
+    var baseURL: String { get }
+    var apiKey: String { get }
+    var apiProtocol: APIProtocol { get }
+    var customHeaders: [String: String] { get }
+    var models: [ModelSpec] { get }
+    var requestTimeout: TimeInterval { get }
+
+    func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
     ) -> AsyncThrowingStream<ProviderStreamEvent, Error>
 }
 ```
 
-The framework never calls HTTP APIs directly. All network communication is encapsulated inside a provider, making it straightforward to swap backends, add middleware, or substitute a mock for testing.
-
----
-
-## ProviderConfiguration
-
-A value type that carries connection details:
+`ModelProviderCentral` registers providers by name and resolves compound model references:
 
 ```swift
-public struct ProviderConfiguration: Sendable {
-    public let apiKey: String
-    public let model: String
-    public let maxTokens: Int
-    public let baseURL: URL?
-    public let defaultHeaders: [String: String]
-    public let options: [String: Any]
+await providerCentral.register(name: "anthropic", provider: provider)
 
-    public init(
-        apiKey: String,
-        model: String,
-        maxTokens: Int = 4096,
-        baseURL: URL? = nil,
-        defaultHeaders: [String: String] = [:],
-        options: [String: Any] = [:]
-    )
+let resolved = await providerCentral.resolve(
+    modelReference: "anthropic/claude-sonnet-4-6"
+)
+```
+
+## ModelSpec
+
+```swift
+public struct ModelSpec: Sendable, Codable {
+    public var id: String
+    public var reasoning: Bool
+    public var inputModalities: [String]
+    public var contextWindow: Int
+    public var maxTokens: Int
 }
 ```
 
-| Property | Purpose |
-|---|---|
-| `apiKey` | Authentication token for the backend |
-| `model` | Model identifier (e.g., `claude-sonnet-4-20250514`, `gpt-4o`) |
-| `maxTokens` | Default maximum tokens per response |
-| `baseURL` | Override the default API endpoint |
-| `defaultHeaders` | Extra HTTP headers sent with every request |
-| `options` | Provider-specific key-value pairs |
+`maxTokens` describes the provider or model upper bound. Providers can choose a lower request default when building API requests.
 
----
+## AnthropicProvider
+
+```swift
+let provider = AnthropicProvider(
+    baseURL: "https://api.anthropic.com",
+    apiKey: "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx",
+    apiProtocol: .anthropicMessages,
+    customHeaders: [:],
+    models: [
+        ModelSpec(id: "claude-sonnet-4-6")
+    ],
+    requestTimeout: 300,
+    defaultRequestMaxTokens: 4096,
+    maxConcurrency: 5
+)
+```
+
+`AnthropicProvider` streams Anthropic Messages API SSE responses and maps them into `ProviderStreamEvent`.
 
 ## ProviderStreamEvent
 
-Events emitted by a provider during streaming:
-
 ```swift
 public enum ProviderStreamEvent: Sendable {
-    /// Incremental text content.
     case textDelta(String)
-
-    /// The LLM is requesting a tool call.
-    case toolUse(id: String, name: String, input: String)
-
-    /// The stream has ended.
-    case stop(StopReason)
-
-    /// Usage metadata (input tokens, output tokens).
+    case toolCall(AIAgentMessage.ToolCall)
+    case done(stopReason: StopReason)
     case usage(inputTokens: Int, outputTokens: Int)
 }
 ```
 
-### StopReason
-
-```swift
-public enum StopReason: String, Sendable, Codable {
-    case endTurn = "end_turn"
-    case toolUse = "tool_use"
-    case maxTokens = "max_tokens"
-    case stopSequence = "stop_sequence"
-}
-```
-
-The `AIAgentLoop` inspects `StopReason` to decide whether to continue (`.toolUse`) or finish (`.endTurn`, `.maxTokens`, `.stopSequence`).
-
----
+These events are provider-internal. `LLMExecutor` converts them into public `AIAgentEvent` values such as `.streamingContent`, `.toolCallStarted`, `.completed`, and `.error`.
 
 ## ContentOrCacheControl
 
-System prompts are passed as `[ContentOrCacheControl]` to support Anthropic-style prompt caching:
+System prompt segments and tool definitions are passed as arrays of:
 
 ```swift
-public enum ContentOrCacheControl: Codable, Sendable {
-    case text(String)
-    case cacheControl(String, CachePolicy)
-}
-
-public enum CachePolicy: String, Codable, Sendable {
-    case ephemeral
+public enum ContentOrCacheControl<T: Sendable>: Sendable {
+    case content(T)
+    case cacheControl
 }
 ```
 
-Providers that do not support cache control can extract the text content from each element:
+For Anthropic, `.cacheControl` attaches ephemeral cache control to the previous serializable segment.
 
-```swift
-let plainText = systemBlocks.map { block -> String in
-    switch block {
-    case .text(let s): return s
-    case .cacheControl(let s, _): return s
-    }
-}
-```
-
-Providers that do support it (like `AnthropicProvider`) serialize the full structure.
-
----
-
-## Implementing a Custom Provider
-
-Below is a skeleton for an OpenAI-compatible provider. It demonstrates the required conformance without a full networking implementation:
+## Custom Provider Skeleton
 
 ```swift
 import Foundation
-import OpenAPPCore
+import OpenAPP
 
-public final class OpenAIProvider: LLMProvider {
-    private let configuration: ProviderConfiguration
-    private let session: URLSession
+public final class OpenAICompatibleProvider: ModelProvider, @unchecked Sendable {
+    public let name = "openai-compatible"
+    public let baseURL: String
+    public let apiKey: String
+    public let apiProtocol: APIProtocol = .openaiCompletions
+    public let customHeaders: [String: String]
+    public let models: [ModelSpec]
+    public let requestTimeout: TimeInterval
 
-    public init(configuration: ProviderConfiguration) {
-        self.configuration = configuration
-        self.session = URLSession(configuration: .default)
+    public init(
+        baseURL: String,
+        apiKey: String,
+        customHeaders: [String: String] = [:],
+        models: [ModelSpec],
+        requestTimeout: TimeInterval = 300
+    ) {
+        self.baseURL = baseURL
+        self.apiKey = apiKey
+        self.customHeaders = customHeaders
+        self.models = models
+        self.requestTimeout = requestTimeout
     }
 
-    public func sendMessage(
-        messages: [Message],
-        system: [ContentOrCacheControl],
-        tools: [ToolSchema],
-        maxTokens: Int
+    public func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
     ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    // 1. Build the request body
-                    let body = try buildRequestBody(
-                        messages: messages,
-                        system: system,
-                        tools: tools,
-                        maxTokens: maxTokens
-                    )
-
-                    // 2. Create the URLRequest
-                    var request = URLRequest(
-                        url: configuration.baseURL
-                            ?? URL(string: "https://api.openai.com/v1/chat/completions")!
-                    )
-                    request.httpMethod = "POST"
-                    request.setValue("Bearer \(configuration.apiKey)",
-                                    forHTTPHeaderField: "Authorization")
-                    request.setValue("application/json",
-                                    forHTTPHeaderField: "Content-Type")
-                    request.httpBody = body
-
-                    // 3. Stream the response using URLSession bytes
-                    let (bytes, response) = try await session.bytes(for: request)
-
-                    guard let http = response as? HTTPURLResponse,
-                          (200...299).contains(http.statusCode) else {
-                        throw AIAgentError.providerError("Non-200 response")
-                    }
-
-                    // 4. Parse SSE lines and yield ProviderStreamEvent values
-                    for try await line in bytes.lines {
-                        if let event = try parseSSELine(line) {
-                            continuation.yield(event)
-                        }
-                    }
-
+                    // Build URLRequest from messages, system, tools, and modelId.
+                    // Stream backend events and map them to ProviderStreamEvent.
+                    continuation.yield(.textDelta("Hello"))
+                    continuation.yield(.done(stopReason: .endTurn))
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
 
-            continuation.onTermination = { _ in
+            continuation.onTermination = { @Sendable _ in
                 task.cancel()
             }
         }
     }
-
-    // MARK: - Private Helpers
-
-    private func buildRequestBody(
-        messages: [Message],
-        system: [ContentOrCacheControl],
-        tools: [ToolSchema],
-        maxTokens: Int
-    ) throws -> Data {
-        // Convert OpenAPP messages to OpenAI chat format
-        // Convert ToolSchema to OpenAI function definitions
-        // Return JSON-encoded body
-        fatalError("Implement for your backend")
-    }
-
-    private func parseSSELine(_ line: String) throws -> ProviderStreamEvent? {
-        // Parse "data: {...}" SSE lines
-        // Map to ProviderStreamEvent cases
-        fatalError("Implement for your backend")
-    }
 }
 ```
 
-### Key Implementation Notes
+## Error Classification
 
-1. **Map messages.** Translate OpenAPP `Message` values (which use Anthropic-style roles and content blocks) into the format your backend expects.
+`LLMExecutor` uses `ErrorClassifier` to decide whether an error is retryable, whether context compression should be attempted, and whether fallback is appropriate.
 
-2. **Map tool schemas.** Convert `ToolSchema` into the backend's function/tool definition format.
-
-3. **Emit the right events.** The `AIAgentLoop` relies on receiving:
-   - `.textDelta` for incremental text
-   - `.toolUse` when the model wants to call a tool (include the tool call `id` so the loop can pair results)
-   - `.stop` with the correct `StopReason`
-
-4. **Handle cancellation.** Respect `continuation.onTermination` so the caller can cancel mid-stream.
-
-5. **Thread safety.** `LLMProvider` requires `Sendable` conformance. Avoid mutable shared state.
-
----
-
-## Anthropic Provider Reference
-
-The built-in `AnthropicProvider` serves as the reference implementation:
-
-```swift
-let config = ProviderConfiguration(
-    apiKey: "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx",
-    model: "claude-sonnet-4-20250514",
-    maxTokens: 4096
-)
-
-let provider = AnthropicProvider(configuration: config)
-```
-
-It supports:
-
-- Streaming via Anthropic's SSE `/v1/messages` endpoint
-- Tool use with automatic JSON Schema serialization
-- `ContentOrCacheControl` for prompt caching
-- Beta header injection via `defaultHeaders`
-
-Study its source in `Sources/OpenAPPCore/Providers/AnthropicProvider.swift` for a complete working example.
-
----
-
-## Next Steps
-
-- [Getting Started](GettingStarted.md) -- use a provider in a session
-- [Tools](Tools.md) -- define tools that the LLM can invoke
-- [Architecture](Architecture.md) -- see how providers fit into the overall design
+Fallback policy exists in `ModelPolicy`, but full runtime fallback execution is still a planned enhancement.

@@ -15,7 +15,7 @@ import Foundation
 /// Responsibilities:
 /// - System prompt assembly
 /// - Tool resolution and parallel execution
-/// - Provider streaming, retry, and model fallback
+/// - Provider streaming and retry
 /// - Context compression
 /// - Tool loop detection
 public final class LLMExecutor: @unchecked Sendable {
@@ -32,6 +32,9 @@ public final class LLMExecutor: @unchecked Sendable {
 
     /// The Task driving the run loop. Non-nil while running.
     private var _runTask: Task<Void, Never>?
+
+    /// Identity of the run currently allowed to mutate session/UI state.
+    private var _activeRunID: UUID?
 
     /// Current iteration number (1-based). Updated at the start of each iteration.
     @Locked
@@ -58,87 +61,130 @@ public final class LLMExecutor: @unchecked Sendable {
     /// manages UI state, drives the LLM ↔ tool loop, and updates the session on completion.
     public func run(_ text: String) -> AsyncStream<AIAgentEvent> {
         let (outputStream, outputContinuation) = AsyncStream<AIAgentEvent>.makePair()
+        let runID = UUID()
 
-        Task { [weak self] in
+        outputContinuation.onTermination = { @Sendable [weak self] termination in
+            if case .cancelled = termination {
+                self?.cancel(runID: runID)
+            }
+        }
+
+        let previousTask = lock.writeSync { () -> Task<Void, Never>? in
+            let task = _runTask
+            _runTask = nil
+            _activeRunID = runID
+            return task
+        }
+        previousTask?.cancel()
+
+        let task = Task { [weak self] in
             guard let self else {
                 outputContinuation.finish()
                 return
             }
 
+            defer {
+                self.clearRunTask(runID: runID)
+                outputContinuation.finish()
+            }
+
             guard let session = self.session else {
                 outputContinuation.yield(.error(AIAgentError.sessionReleased))
-                outputContinuation.finish()
                 return
             }
+
+            guard self.isActiveRun(runID) else { return }
+
+            // Reset UI state before validation so early errors surface consistently.
+            session.uiState.resetStreamingText()
+            session.uiState.setError(nil)
+            session.uiState.setStreaming(true)
 
             // Add user message to session
             session.addUserMessage(text)
             Logger.info("LLMExecutor", "run: sessionId=\(session.id), text=\"\(text.prefix(100))\(text.count > 100 ? "..." : "")\", messageCount=\(session.messages.count)")
 
-            // Resolve provider
+            // Resolve provider from session
             guard let agent = session.agentMask?.agent else {
+                let error = ModelError.providerError("No agent attached")
                 Logger.error("LLMExecutor", "run: sessionId=\(session.id), no agent attached")
-                outputContinuation.yield(.error(ModelError.providerError("No agent attached")))
-                outputContinuation.finish()
+                if self.isActiveRun(runID) {
+                    session.uiState.setStreaming(false)
+                    session.uiState.setError(error)
+                }
+                outputContinuation.yield(.error(error))
                 return
             }
 
-            let resolved: (provider: any ModelProvider, model: ModelConfiguration)?
-            if let mask = session.agentMask {
-                resolved = await self.resolveProvider(mask: mask)
-            } else {
-                resolved = await agent.resolveProvider()
-            }
-
-            guard let resolved else {
-                Logger.error("LLMExecutor", "run: sessionId=\(session.id), no provider resolved")
-                outputContinuation.yield(.error(ModelError.providerError("No provider configured")))
-                outputContinuation.finish()
+            guard let provider = session.provider, let modelId = session.modelId else {
+                let error = ModelError.providerError("No provider configured")
+                Logger.error("LLMExecutor", "run: sessionId=\(session.id), no provider/model configured")
+                if self.isActiveRun(runID) {
+                    session.uiState.setStreaming(false)
+                    session.uiState.setError(error)
+                    agent.sessionDidEncounterError(session, error: error)
+                }
+                outputContinuation.yield(.error(error))
                 return
             }
-
-            // Cancel any previous run
-            self.lock.writeSync {
-                self._runTask?.cancel()
-            }
-
-            // Reset UI state
-            session.uiState.resetStreamingText()
-            session.uiState.setError(nil)
-            session.uiState.setStreaming(true)
 
             let maxIter = session.agentMask?.profile.maxIterations ?? agent.profile.maxIterations
 
             // Run the execution loop
             await self.runLoop(
+                runID: runID,
                 initialMessages: session.messages,
-                provider: resolved.provider,
-                model: resolved.model,
+                provider: provider,
+                modelId: modelId,
                 maxIterations: maxIter,
                 session: session,
                 agent: agent,
                 continuation: outputContinuation
             )
-            outputContinuation.finish()
-            self.lock.writeSync { self._runTask = nil }
         }
 
-        // Store the task. We capture it after Task creation via the closure above;
-        // the task is stored in _runTask inside the Task body. For the isRunning check,
-        // we also store it here.
-        // Note: The Task closure captures self weakly and sets _runTask = nil on completion.
+        let shouldCancelTask = lock.writeSync { () -> Bool in
+            guard _activeRunID == runID else { return true }
+            _runTask = task
+            return false
+        }
+        if shouldCancelTask {
+            task.cancel()
+        }
 
         return outputStream
     }
 
     /// Cancel the current execution.
     public func cancel() {
-        lock.writeSync {
-            _runTask?.cancel()
-            _runTask = nil
-        }
-        session?.uiState.setStreaming(false)
+        cancel(runID: nil)
         Logger.info("LLMExecutor", "cancel: sessionId=\(session?.id ?? "nil")")
+    }
+
+    private func cancel(runID: UUID?) {
+        let task = lock.writeSync { () -> Task<Void, Never>? in
+            if let runID, _activeRunID != runID {
+                return nil
+            }
+            let task = _runTask
+            _runTask = nil
+            _activeRunID = nil
+            return task
+        }
+        task?.cancel()
+        session?.uiState.setStreaming(false)
+    }
+
+    private func isActiveRun(_ runID: UUID) -> Bool {
+        lock.read { _activeRunID == runID }
+    }
+
+    private func clearRunTask(runID: UUID) {
+        lock.writeSync {
+            guard _activeRunID == runID else { return }
+            _runTask = nil
+            _activeRunID = nil
+        }
     }
 
     // MARK: - System Prompt Assembly
@@ -236,29 +282,13 @@ public final class LLMExecutor: @unchecked Sendable {
         return StableSort.byName(filtered) { $0.name }
     }
 
-    // MARK: - Provider Resolution
-
-    /// Resolve provider using the mask's modelPolicy and providerCentral.
-    private func resolveProvider(mask: AIAgentMask) async -> (provider: any ModelProvider, model: ModelConfiguration)? {
-        if let selector = mask.modelPolicy {
-            if let result = await mask.providerCentral.resolve(modelReference: selector.primary) {
-                return result
-            }
-            for fallback in selector.fallbacks {
-                if let result = await mask.providerCentral.resolve(modelReference: fallback) {
-                    return result
-                }
-            }
-        }
-        return await mask.providerCentral.resolveDefault()
-    }
-
     // MARK: - Run Loop
 
     private func runLoop(
+        runID: UUID,
         initialMessages: [AIAgentMessage],
         provider: any ModelProvider,
-        model: ModelConfiguration,
+        modelId: String,
         maxIterations: Int,
         session: AISession,
         agent: AIAgent,
@@ -268,22 +298,37 @@ public final class LLMExecutor: @unchecked Sendable {
         var iteration = 0
         var retryCount = 0
         var loopDetector = ToolLoopDetector()
-        var currentProvider: any ModelProvider = provider
-        var currentModel: ModelConfiguration = model
-        var fallbackIndex = 0
+
+        func finishWithError(_ error: Error, messages: [AIAgentMessage]) {
+            if self.isActiveRun(runID) {
+                session.updateMessages(messages)
+                session.uiState.setStreaming(false)
+                session.uiState.setError(error)
+                agent.sessionDidEncounterError(session, error: error)
+            }
+            continuation.yield(.error(error))
+        }
+
+        defer {
+            if self.isActiveRun(runID) {
+                session.uiState.setStreaming(false)
+            }
+        }
 
         while iteration < maxIterations {
             // Check cancellation
             guard !Task.isCancelled else {
+                let error = AIAgentError.cancelled
                 Logger.info("LLMExecutor", "cancelled at iteration \(iteration)")
-                continuation.yield(.error(AIAgentError.cancelled))
+                finishWithError(error, messages: currentMessages)
                 return
             }
 
             // Verify session is still alive
             guard self.session != nil else {
+                let error = AIAgentError.sessionReleased
                 Logger.error("LLMExecutor", "session released during execution at iteration \(iteration)")
-                continuation.yield(.error(AIAgentError.sessionReleased))
+                finishWithError(error, messages: currentMessages)
                 return
             }
 
@@ -309,11 +354,12 @@ public final class LLMExecutor: @unchecked Sendable {
             }
 
             // 4. Context compression
-            if let compressor = self.compressor {
+            if let compressor = self.compressor,
+               let contextWindow = provider.modelSpec(for: modelId)?.contextWindow {
                 let estimatedTokens = compressor.estimateTokens(messages: currentMessages)
-                let threshold = Int(Double(model.contextWindow) * 0.85)
+                let threshold = Int(Double(contextWindow) * 0.85)
                 if estimatedTokens > threshold {
-                    let targetTokens = Int(Double(model.contextWindow) * 0.6)
+                    let targetTokens = Int(Double(contextWindow) * 0.6)
                     currentMessages = await compressor.compress(messages: currentMessages, targetTokens: targetTokens)
                     Logger.info("LLMExecutor", "context compressed: ~\(estimatedTokens) → ~\(targetTokens) tokens, messages: \(currentMessages.count)")
                 }
@@ -323,13 +369,13 @@ public final class LLMExecutor: @unchecked Sendable {
             let messagesForProvider = await self.prepareMessagesForProvider(
                 currentMessages, session: session, isFirstIteration: (iteration == 1)
             )
-            let stream = currentProvider.streamCompletion(
+            let stream = provider.streamCompletion(
                 messages: messagesForProvider,
                 system: systemParts,
                 tools: toolSegments,
-                model: currentModel
+                modelId: modelId
             )
-            Logger.debug("LLMExecutor", "streamCompletion requested: provider=\(currentProvider.name), model=\(currentModel.id), messageCount=\(currentMessages.count), toolCount=\(toolSegments.count)")
+            Logger.debug("LLMExecutor", "streamCompletion requested: provider=\(provider.name), model=\(modelId), messageCount=\(currentMessages.count), toolCount=\(toolSegments.count)")
 
             // Consume the stream
             var assistantText = ""
@@ -338,10 +384,14 @@ public final class LLMExecutor: @unchecked Sendable {
 
             do {
                 for try await event in stream {
+                    try Task.checkCancellation()
                     switch event {
                     case .textDelta(let delta):
                         assistantText += delta
                         continuation.yield(.streamingContent(delta))
+                        if self.isActiveRun(runID) {
+                            session.uiState.appendStreamingText(delta)
+                        }
 
                     case .toolCall(let call):
                         toolCalls.append(call)
@@ -356,6 +406,11 @@ public final class LLMExecutor: @unchecked Sendable {
                 }
                 Logger.info("LLMExecutor", "streamConsumed: textLength=\(assistantText.count), toolCalls=\(toolCalls.count)[\(toolCalls.map(\.name).joined(separator: ", "))], stopReason=\(stopReason)")
                 retryCount = 0
+            } catch is CancellationError {
+                let error = AIAgentError.cancelled
+                Logger.info("LLMExecutor", "streamCancelled: iteration=\(iteration)")
+                finishWithError(error, messages: currentMessages)
+                return
             } catch {
                 let classified = ErrorClassifier.classify(error)
                 Logger.error("LLMExecutor", "streamError: iteration=\(iteration), reason=\(classified.reason), retryable=\(classified.retryable), retryCount=\(retryCount)/\(retryPolicy.maxRetries), error=\(error)")
@@ -364,35 +419,21 @@ public final class LLMExecutor: @unchecked Sendable {
                     retryCount += 1
                     let delay = retryPolicy.delay(for: retryCount - 1)
                     Logger.info("LLMExecutor", "retrying in \(String(format: "%.1f", delay))s (attempt \(retryCount)/\(retryPolicy.maxRetries))")
-                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    } catch {
+                        finishWithError(AIAgentError.cancelled, messages: currentMessages)
+                        return
+                    }
                     continue
                 }
 
-                // Runtime model fallback
-                if classified.shouldFallback {
-                    let selector = session.agentMask?.modelPolicy
-                    let central = session.agentMask?.providerCentral
-                    if let selector, let central {
-                        var didFallback = false
-                        while fallbackIndex < selector.fallbacks.count {
-                            let fallbackRef = selector.fallbacks[fallbackIndex]
-                            fallbackIndex += 1
-                            if let resolved = await central.resolve(modelReference: fallbackRef) {
-                                Logger.warning("LLMExecutor", "falling back to model: \(fallbackRef)")
-                                currentProvider = resolved.provider
-                                currentModel = resolved.model
-                                retryCount = 0
-                                didFallback = true
-                                break
-                            }
-                        }
-                        if didFallback {
-                            continue
-                        }
-                    }
-                }
+                finishWithError(error, messages: currentMessages)
+                return
+            }
 
-                continuation.yield(.error(error))
+            guard !Task.isCancelled else {
+                finishWithError(AIAgentError.cancelled, messages: currentMessages)
                 return
             }
 
@@ -410,14 +451,20 @@ public final class LLMExecutor: @unchecked Sendable {
 
             // 7. If tool_use, execute tools and loop
             if stopReason == .toolUse, !toolCalls.isEmpty {
-                let (toolResultParts, shouldTerminate) = await executeToolsConcurrently(
+                let (toolResultParts, terminalError) = await executeToolsConcurrently(
                     calls: toolCalls,
                     session: session,
                     loopDetector: &loopDetector,
                     continuation: continuation
                 )
 
-                if shouldTerminate {
+                if let terminalError {
+                    finishWithError(terminalError, messages: currentMessages)
+                    return
+                }
+
+                guard !Task.isCancelled else {
+                    finishWithError(AIAgentError.cancelled, messages: currentMessages)
                     return
                 }
 
@@ -431,10 +478,12 @@ public final class LLMExecutor: @unchecked Sendable {
             Logger.info("LLMExecutor", "completed: iteration=\(iteration), textLength=\(assistantText.count), totalMessages=\(currentMessages.count)")
 
             // Update session state
-            session.updateMessages(result.updatedMessages)
-            session.uiState.setStreaming(false)
-            session.uiState.resetStreamingText()
-            agent.sessionDidCompleteRun(session, result: result)
+            if self.isActiveRun(runID) {
+                session.updateMessages(result.updatedMessages)
+                session.uiState.setStreaming(false)
+                session.uiState.resetStreamingText()
+                agent.sessionDidCompleteRun(session, result: result)
+            }
 
             continuation.yield(.completed(result))
             return
@@ -442,10 +491,7 @@ public final class LLMExecutor: @unchecked Sendable {
 
         // Exceeded max iterations
         Logger.warning("LLMExecutor", "maxIterationsReached: limit=\(maxIterations)")
-        session.uiState.setStreaming(false)
-        session.uiState.setError(AIAgentError.maxIterationsReached)
-        agent.sessionDidEncounterError(session, error: AIAgentError.maxIterationsReached)
-        continuation.yield(.error(AIAgentError.maxIterationsReached))
+        finishWithError(AIAgentError.maxIterationsReached, messages: currentMessages)
     }
 
     // MARK: - Parallel Tool Execution
@@ -460,10 +506,10 @@ public final class LLMExecutor: @unchecked Sendable {
         session: AISession,
         loopDetector: inout ToolLoopDetector,
         continuation: AsyncStream<AIAgentEvent>.Continuation
-    ) async -> (results: [AIAgentMessage.Content], shouldTerminate: Bool) {
+    ) async -> (results: [AIAgentMessage.Content], terminalError: Error?) {
 
         // Phase 1: Sequential loop detection
-        var preResults: [String: AIAgentMessage.Content] = [:]
+        var preResults: [String: (content: AIAgentMessage.Content, event: AIAgentEvent?)] = [:]
         var executableCalls: [AIAgentMessage.ToolCall] = []
 
         for call in calls {
@@ -471,14 +517,16 @@ public final class LLMExecutor: @unchecked Sendable {
             switch loopResult {
             case .critical(let message):
                 Logger.error("LLMExecutor", "toolLoopCritical: \(message)")
-                continuation.yield(.error(AIAgentError.toolLoopDetected(call.name)))
-                return (results: [], shouldTerminate: true)
+                let error = AIAgentError.toolLoopDetected(call.name)
+                continuation.yield(.toolCallFailed(toolCallId: call.id, name: call.name, error: error))
+                return (results: [], terminalError: error)
             case .warning(let message):
                 Logger.warning("LLMExecutor", "toolLoopWarning: \(message)")
-                preResults[call.id] = .toolResult(AIAgentMessage.ToolCallResult(
+                let output = Tool.Output.text(message)
+                preResults[call.id] = (.toolResult(AIAgentMessage.ToolCallResult(
                     toolCallId: call.id,
-                    content: message
-                ))
+                    content: output.stringValue
+                )), .toolCallCompleted(toolCallId: call.id, result: output))
             case .ok:
                 executableCalls.append(call)
             }
@@ -523,7 +571,10 @@ public final class LLMExecutor: @unchecked Sendable {
 
         for call in calls {
             if let pre = preResults[call.id] {
-                orderedResults.append(pre)
+                if let event = pre.event {
+                    continuation.yield(event)
+                }
+                orderedResults.append(pre.content)
             } else if let exec = executionResults[call.id] {
                 // Yield event in original order
                 if let event = exec.event {
@@ -533,7 +584,7 @@ public final class LLMExecutor: @unchecked Sendable {
             }
         }
 
-        return (results: orderedResults, shouldTerminate: false)
+        return (results: orderedResults, terminalError: nil)
     }
 
     /// Execute a single tool call with safety check and timeout.
@@ -544,7 +595,7 @@ public final class LLMExecutor: @unchecked Sendable {
         session: AISession,
         toolTimeout: TimeInterval
     ) async -> (String, AIAgentMessage.Content, AIAgentEvent?) {
-        let argsDescription = call.arguments.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+        let argsDescription = describeArgumentsForLog(call.arguments)
         Logger.info("LLMExecutor", "toolExec: name=\(call.name), id=\(call.id), args={\(argsDescription)}")
 
         do {
@@ -604,6 +655,30 @@ public final class LLMExecutor: @unchecked Sendable {
                 content: "Error: \(error.localizedDescription)"
             ))
             return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: error))
+        }
+    }
+
+    private static func describeArgumentsForLog(_ arguments: [String: JSONValue]) -> String {
+        arguments.keys.sorted().map { key in
+            let value = arguments[key] ?? .null
+            return "\(key)=\(describeValueForLog(value))"
+        }.joined(separator: ", ")
+    }
+
+    private static func describeValueForLog(_ value: JSONValue) -> String {
+        switch value {
+        case .string(let string):
+            return "<string:\(string.count) chars>"
+        case .number:
+            return "<number>"
+        case .bool:
+            return "<bool>"
+        case .null:
+            return "null"
+        case .array(let values):
+            return "<array:\(values.count) items>"
+        case .object(let object):
+            return "<object:\(object.count) keys>"
         }
     }
 

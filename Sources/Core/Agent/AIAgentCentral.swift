@@ -39,7 +39,7 @@ public actor AIAgentCentral {
     ///   - profile: AIAgent profile (prompts, identity, memory, tool settings).
     ///   - toolCentral: Tool registry. Default: `.default`.
     ///   - providerCentral: Provider registry. Default: `.default`.
-    ///   - modelPolicy: Model selection. Default: nil.
+    ///   - modelPolicy: Model selection policy (primary + fallbacks). Default: nil.
     ///   - toolPolicy: Tool filtering policy. Default: nil.
     ///   - memoryStorage: Storage backend for long-term memory. Default: FileMemoryStorage.
     ///   - sessionStorage: Storage backend for session persistence. Default: FileSessionStorage.
@@ -51,7 +51,7 @@ public actor AIAgentCentral {
         profile: AIAgentProfile = AIAgentProfile(),
         toolCentral: ToolCentral = .`default`,
         providerCentral: ModelProviderCentral = .`default`,
-        modelPolicy: ModelProviderCentral.ModelPolicy? = nil,
+        modelPolicy: ModelPolicy? = nil,
         toolPolicy: ToolCentral.ToolPolicy? = nil,
         memoryStorage: any MemoryStorage = FileMemoryStorage(),
         sessionStorage: any SessionStorage = FileSessionStorage(),
