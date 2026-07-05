@@ -29,12 +29,12 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         // 2) SDK chat UI – mounted in its own independent overlay window.
         Task { @MainActor in
-            guard DemoConfig.loaded != nil else {
+            guard DemoConfig.loaded != nil, DemoConfig.hasUsableProviderConfig else {
                 if let presenter = host.rootViewController {
                     showAlert(
                         on: presenter,
-                        title: "缺少配置文件",
-                        message: "未找到 config.json。\n\n请在 Resources/ 目录下执行:\ncp config.json.example config.json\n然后填入你的配置并重新运行。"
+                        title: "配置未完成",
+                        message: "请复制示例配置并填入 API key:\ncp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json\n\n然后重新运行 demo。"
                     )
                 }
                 return

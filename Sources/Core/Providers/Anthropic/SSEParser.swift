@@ -48,7 +48,7 @@ public struct SSEParser {
     }
 
     private mutating func emitIfReady() -> SSEEvent? {
-        guard !currentEvent.isEmpty, !currentData.isEmpty else { return nil }
+        guard !currentData.isEmpty else { return nil }
         let event = SSEEvent(event: currentEvent, data: currentData)
         currentEvent = ""
         currentData = ""

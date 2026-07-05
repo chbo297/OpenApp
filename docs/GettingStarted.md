@@ -148,10 +148,10 @@ session.cancel()
 The demo app is an Xcode project at `Examples/iOS/OpenAPPDemo.xcodeproj`.
 
 ```bash
-cp Examples/iOS/Resources/config.json.example Examples/iOS/config.json
+cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json
 ```
 
-Fill in `Examples/iOS/config.json`, open the Xcode project, choose an iOS Simulator or device, and run.
+Fill in `Examples/iOS/Resources/config.json`, open the Xcode project, choose an iOS Simulator or device, and run.
 
 ## Next Steps
 

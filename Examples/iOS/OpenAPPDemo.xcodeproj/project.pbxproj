@@ -6,13 +6,8 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		C0A0AC712F889CE4000E6D73 /* config.json in Resources */ = {isa = PBXBuildFile; fileRef = C0A0AC6D2F889CE4000E6D73 /* config.json */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXFileReference section */
 		A1B2C3D4E5F6A7B800000003 /* OpenAPPDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OpenAPPDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		C0A0AC6D2F889CE4000E6D73 /* config.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = config.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -49,7 +44,6 @@
 			isa = PBXGroup;
 			children = (
 				A1B2C3D4E5F6A7B800000070 /* OpenAPP */,
-				C0A0AC6D2F889CE4000E6D73 /* config.json */,
 				A1B2C3D4E5F6A7B800000004 /* Sources */,
 				A1B2C3D4E5F6A7B800000005 /* Resources */,
 				A1B2C3D4E5F6A7B800000011 /* Products */,
@@ -123,7 +117,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C0A0AC712F889CE4000E6D73 /* config.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -149,6 +142,8 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 8ED2N2GBR7;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OpenAPPDemo needs microphone access to record voice input.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "OpenAPPDemo needs speech recognition access to transcribe voice input.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
@@ -176,6 +171,8 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 8ED2N2GBR7;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OpenAPPDemo needs microphone access to record voice input.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "OpenAPPDemo needs speech recognition access to transcribe voice input.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;

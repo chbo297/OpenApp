@@ -67,17 +67,17 @@ public final class ChatMessageCell: UITableViewCell {
         switch message.role {
         case .user:
             trailingConstraint.isActive = true
-            bubbleView.backgroundColor = UIColor.systemBlue
+            bubbleView.backgroundColor = OpenAPPAppearance.userBubbleBackground
             messageLabel.textColor = .white
         case .assistant:
             leadingConstraint.isActive = true
-            bubbleView.backgroundColor = UIColor.secondarySystemBackground
-            messageLabel.textColor = .label
+            bubbleView.backgroundColor = OpenAPPAppearance.assistantBubbleBackground
+            messageLabel.textColor = OpenAPPAppearance.primaryText
         }
 
         if message.status == .error {
-            bubbleView.backgroundColor = UIColor.systemRed.withAlphaComponent(0.15)
-            messageLabel.textColor = .systemRed
+            bubbleView.backgroundColor = OpenAPPAppearance.errorBackground
+            messageLabel.textColor = OpenAPPAppearance.errorText
         }
     }
 }

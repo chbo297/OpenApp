@@ -13,9 +13,13 @@ Use this skill when the user asks to run the migrated source command `build-demo
 
 执行步骤：
 
-1. 检查 `Examples/iOS/config.json` 是否存在。如果不存在，提示用户：
-   > "缺少 `Examples/iOS/config.json`，参考 `config.json.example` 创建并填入 API key 后再跑 /build-demo"
-   然后停止。
+1. 检查 `Examples/iOS/Resources/config.json` 是否存在。
+   - 如果不存在，说明 demo 构建会使用已入库的 `Examples/iOS/Resources/config.json.example`，但运行时会提示配置未完成。
+   - 需要真实请求时，提示用户执行：
+     ```
+     cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json
+     ```
+     然后填入 API key。
 2. 在仓库根目录运行：
    ```
    xcodebuild \

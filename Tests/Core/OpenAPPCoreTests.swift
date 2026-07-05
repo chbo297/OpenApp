@@ -236,6 +236,63 @@ final class OpenAPPCoreTests: XCTestCase {
         XCTAssertEqual(flushed?.event, "message_stop")
     }
 
+    func testSSEParserDataOnlyEvent() {
+        var parser = SSEParser()
+        _ = parser.processLine("data: {\"choices\":[]}")
+
+        let parsed = parser.processLine("")
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.event, "")
+        XCTAssertEqual(parsed?.data, "{\"choices\":[]}")
+    }
+
+    func testOpenAIChatCompletionsParserTextDelta() {
+        var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
+        let event = SSEEvent(
+            event: "",
+            data: #"{"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}"#
+        )
+
+        let events = OpenAIChatCompletionsMapper.parseSSEEvent(
+            event,
+            activeToolCalls: &activeToolCalls
+        )
+
+        XCTAssertEqual(events.count, 1)
+        if case .textDelta(let text) = events[0] {
+            XCTAssertEqual(text, "Hello")
+        } else {
+            XCTFail("Expected text delta")
+        }
+    }
+
+    func testOpenAIChatCompletionsParserToolCall() {
+        var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
+        let event = SSEEvent(
+            event: "",
+            data: #"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"file_search","arguments":"{\"query\":\"Swift\"}"}}]},"finish_reason":"tool_calls"}]}"#
+        )
+
+        let events = OpenAIChatCompletionsMapper.parseSSEEvent(
+            event,
+            activeToolCalls: &activeToolCalls
+        )
+
+        XCTAssertEqual(events.count, 2)
+        if case .toolCall(let call) = events[0] {
+            XCTAssertEqual(call.id, "call_1")
+            XCTAssertEqual(call.name, "file_search")
+            XCTAssertEqual(call.arguments["query"]?.stringValue, "Swift")
+        } else {
+            XCTFail("Expected tool call")
+        }
+        if case .done(let stopReason) = events[1] {
+            XCTAssertEqual(stopReason, .toolUse)
+        } else {
+            XCTFail("Expected done event")
+        }
+    }
+
     // MARK: - AISession Storage
 
     func testInMemorySessionStorage() async throws {

@@ -8,11 +8,13 @@
 
 ## 0. 安全（最高优先级）
 
-- [ ] **P0** Examples/iOS/config.json 连同真实 API key 已被提交进 git 历史（在 initial commit 中）。
-  根因：.gitignore 写的是 Examples/iOS/Resources/config.json，实际文件位于 Examples/iOS/config.json，路径差一级。
+- [ ] **P0** 历史提交中曾包含 demo 真实 API key。
+  根因：早期 demo 配置路径在 Examples/iOS/config.json 与 Examples/iOS/Resources/config.json 之间漂移，
+  工程引用、文档说明和 .gitignore 未保持一致。当前约定路径为 Examples/iOS/Resources/config.json，
+  并同时忽略旧根目录路径以防本地残留误提交。
   处理步骤：
   1. 立即轮换该 key；
-  2. git rm --cached Examples/iOS/config.json，并把 .gitignore 改为 Examples/iOS/config.json；
+  2. 确认真实配置不再被 Xcode 工程硬引用，也不进入 git 索引；
   3. 如果仓库已推送或将来开源，必须用 git filter-repo 清理历史，该 key 一律视为已泄露。
 
 ## 一、方向性优化

@@ -148,10 +148,10 @@ For direct embedding, create an `OpenAPPViewController`, assign an agent, and sw
 The iOS demo lives in `Examples/iOS/OpenAPPDemo.xcodeproj`.
 
 ```bash
-cp Examples/iOS/Resources/config.json.example Examples/iOS/config.json
+cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json
 ```
 
-Fill in `Examples/iOS/config.json`, open the demo project, choose an iOS Simulator or device, and run.
+Fill in `Examples/iOS/Resources/config.json`, open the demo project, choose an iOS Simulator or device, and run.
 
 ## License
 

@@ -110,13 +110,17 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         }
 
         var parser = SSEParser()
-        var activeToolCalls: [Int: (id: String, name: String, jsonAccumulator: String)] = [:]
+        var anthropicToolCalls: [Int: (id: String, name: String, jsonAccumulator: String)] = [:]
+        var openAIToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
 
         for try await line in bytes.lines {
             try Task.checkCancellation()
             if let sseEvent = parser.processLine(line) {
-                for providerEvent in AnthropicMapper.parseSSEEvent(
-                    sseEvent, activeToolCalls: &activeToolCalls) {
+                for providerEvent in parseProviderSSEEvent(
+                    apiProtocol: apiProtocol,
+                    sseEvent: sseEvent,
+                    anthropicToolCalls: &anthropicToolCalls,
+                    openAIToolCalls: &openAIToolCalls) {
                     continuation.yield(providerEvent)
                 }
             }
@@ -124,8 +128,11 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 
         // Flush remaining SSE data
         if let sseEvent = parser.flush() {
-            for providerEvent in AnthropicMapper.parseSSEEvent(
-                sseEvent, activeToolCalls: &activeToolCalls) {
+            for providerEvent in parseProviderSSEEvent(
+                apiProtocol: apiProtocol,
+                sseEvent: sseEvent,
+                anthropicToolCalls: &anthropicToolCalls,
+                openAIToolCalls: &openAIToolCalls) {
                 continuation.yield(providerEvent)
             }
         }
@@ -139,7 +146,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         request: URLRequest,
         continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation
     ) async {
-        let delegate = SSEStreamDelegate(continuation: continuation)
+        let delegate = SSEStreamDelegate(apiProtocol: apiProtocol, continuation: continuation)
         let delegateQueue = OperationQueue()
         delegateQueue.maxConcurrentOperationCount = 1
         delegateQueue.name = "openapp.sse-delegate"
@@ -166,6 +173,35 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
     /// custom headers), and serializes the JSON body using the provided `model` configuration
     /// for model ID and max tokens.
     private func buildRequest(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String,
+        maxTokens: Int
+    ) throws -> URLRequest {
+        switch apiProtocol {
+        case .anthropicMessages:
+            return try buildAnthropicMessagesRequest(
+                messages: messages,
+                system: system,
+                tools: tools,
+                modelId: modelId,
+                maxTokens: maxTokens
+            )
+        case .openaiCompletions:
+            return try buildOpenAIChatCompletionsRequest(
+                messages: messages,
+                system: system,
+                tools: tools,
+                modelId: modelId,
+                maxTokens: maxTokens
+            )
+        default:
+            throw ModelError.providerError("API protocol '\(apiProtocol.rawValue)' is not implemented")
+        }
+    }
+
+    private func buildAnthropicMessagesRequest(
         messages: [AIAgentMessage],
         system: [ContentOrCacheControl<SystemPrompt>],
         tools: [ContentOrCacheControl<any ToolProtocol>],
@@ -234,6 +270,82 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 
         return request
     }
+
+    private func buildOpenAIChatCompletionsRequest(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String,
+        maxTokens: Int
+    ) throws -> URLRequest {
+        let effectiveBaseURL = baseURL.isEmpty
+            ? "https://api.openai.com/v1"
+            : baseURL
+        let base = effectiveBaseURL.hasSuffix("/")
+            ? String(effectiveBaseURL.dropLast())
+            : effectiveBaseURL
+
+        let endpoint = base.hasSuffix("/chat/completions")
+            ? base
+            : "\(base)/chat/completions"
+
+        guard let url = URL(string: endpoint) else {
+            throw ModelError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = requestTimeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        for (key, value) in customHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        let toolDefinitions = OpenAIChatCompletionsMapper.toTools(tools)
+        var body: [String: Any] = [
+            "model": modelId,
+            "max_tokens": maxTokens,
+            "stream": true,
+            "messages": OpenAIChatCompletionsMapper.toMessages(messages, system: system)
+        ]
+
+        if !toolDefinitions.isEmpty {
+            body["tools"] = toolDefinitions
+            body["tool_choice"] = "auto"
+        }
+
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        Logger.debug("Anthropic", "buildOpenAIChatCompletionsRequest: url=\(url.absoluteString), model=\(modelId), maxTokens=\(maxTokens), messageCount=\(messages.count), systemSegments=\(system.count), toolCount=\(tools.count)")
+        if Logger.isEnabled {
+            if let bodyData = request.httpBody,
+               let jsonObj = try? JSONSerialization.jsonObject(with: bodyData),
+               let prettyData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.prettyPrinted, .sortedKeys]),
+               let prettyStr = String(data: prettyData, encoding: .utf8) {
+                Logger.debug("Anthropic", "buildOpenAIChatCompletionsRequest body:\n\(prettyStr)")
+            }
+        }
+
+        return request
+    }
+}
+
+private func parseProviderSSEEvent(
+    apiProtocol: APIProtocol,
+    sseEvent: SSEEvent,
+    anthropicToolCalls: inout [Int: (id: String, name: String, jsonAccumulator: String)],
+    openAIToolCalls: inout [Int: OpenAIChatCompletionsMapper.ActiveToolCall]
+) -> [ProviderStreamEvent] {
+    switch apiProtocol {
+    case .anthropicMessages:
+        return AnthropicMapper.parseSSEEvent(sseEvent, activeToolCalls: &anthropicToolCalls)
+    case .openaiCompletions:
+        return OpenAIChatCompletionsMapper.parseSSEEvent(sseEvent, activeToolCalls: &openAIToolCalls)
+    default:
+        return []
+    }
 }
 
 // MARK: - SSEStreamDelegate (iOS 13/14 fallback for streaming)
@@ -241,9 +353,11 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 /// URLSessionDataDelegate that receives streaming SSE data and feeds parsed events
 /// into an `AsyncThrowingStream` continuation. Used on iOS 13/14 where `URLSession.bytes` is unavailable.
 private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let apiProtocol: APIProtocol
     private let continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation
     private var parser = SSEParser()
-    private var activeToolCalls: [Int: (id: String, name: String, jsonAccumulator: String)] = [:]
+    private var anthropicToolCalls: [Int: (id: String, name: String, jsonAccumulator: String)] = [:]
+    private var openAIToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
     private var httpStatusCode: Int?
     private var errorBody = Data()
     private var isErrorResponse = false
@@ -252,7 +366,8 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
 
     var task: URLSessionDataTask?
 
-    init(continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation) {
+    init(apiProtocol: APIProtocol, continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation) {
+        self.apiProtocol = apiProtocol
         self.continuation = continuation
     }
 
@@ -294,8 +409,11 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
         for line in lines {
             guard dataTask.state != .canceling else { return }
             if let sseEvent = parser.processLine(line) {
-                for providerEvent in AnthropicMapper.parseSSEEvent(
-                    sseEvent, activeToolCalls: &activeToolCalls) {
+                for providerEvent in parseProviderSSEEvent(
+                    apiProtocol: apiProtocol,
+                    sseEvent: sseEvent,
+                    anthropicToolCalls: &anthropicToolCalls,
+                    openAIToolCalls: &openAIToolCalls) {
                     continuation.yield(providerEvent)
                 }
             }
@@ -314,8 +432,11 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
         } else {
             // Flush remaining SSE data
             if let sseEvent = parser.flush() {
-                for providerEvent in AnthropicMapper.parseSSEEvent(
-                    sseEvent, activeToolCalls: &activeToolCalls) {
+                for providerEvent in parseProviderSSEEvent(
+                    apiProtocol: apiProtocol,
+                    sseEvent: sseEvent,
+                    anthropicToolCalls: &anthropicToolCalls,
+                    openAIToolCalls: &openAIToolCalls) {
                     continuation.yield(providerEvent)
                 }
             }

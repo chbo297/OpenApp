@@ -36,6 +36,11 @@ public final class OpenAPPMenuButton: UIButton {
         didSet { setNeedsDisplay() }
     }
 
+    public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        setNeedsDisplay()
+    }
+
     public override func draw(_ rect: CGRect) {
         let side = min(Self.iconSide, min(bounds.width, bounds.height))
         let origin = CGPoint(
@@ -47,9 +52,9 @@ public final class OpenAPPMenuButton: UIButton {
         let circleRect = circleBounds.insetBy(dx: half, dy: half)
         let path = UIBezierPath(ovalIn: circleRect)
         let alpha: CGFloat = isEnabled ? 1 : 0.35
-        UIColor.white.withAlphaComponent(alpha).setFill()
+        OpenAPPAppearance.menuFill.withAlphaComponent(alpha).setFill()
         path.fill()
-        UIColor.black.withAlphaComponent(alpha).setStroke()
+        OpenAPPAppearance.menuStroke.withAlphaComponent(alpha).setStroke()
         path.lineWidth = borderWidth
         path.stroke()
     }

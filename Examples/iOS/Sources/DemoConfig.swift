@@ -13,7 +13,7 @@ import Foundation
 /// - **Legacy**: flat top-level fields (`baseUrl`, `apiKey`, `api`, `headers`, `models`).
 ///
 /// Setup:
-///   cp config.json.example config.json
+///   cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json
 ///   Then edit config.json with your actual values.
 struct DemoConfig {
 
@@ -66,12 +66,31 @@ struct DemoConfig {
 
     /// The parsed config, or nil if config.json is missing / malformed.
     static let loaded: ConfigFile? = {
-        guard let url = Bundle.main.url(forResource: "config", withExtension: "json"),
+        guard let url = bundledConfigURL(),
               let data = try? Data(contentsOf: url) else {
             return nil
         }
         return try? JSONDecoder().decode(ConfigFile.self, from: data)
     }()
+
+    private static func bundledConfigURL() -> URL? {
+        Bundle.main.url(forResource: "config", withExtension: "json")
+            ?? Bundle.main.url(forResource: "config.json", withExtension: "example")
+    }
+
+    static var hasUsableProviderConfig: Bool {
+        providerEntries.contains { entry in
+            let apiKey = entry.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return !apiKey.isEmpty
+        }
+    }
+
+    private static var providerEntries: [ProviderEntry] {
+        if let providers = loaded?.providers {
+            return Array(providers.values)
+        }
+        return primaryProvider.map { [$0] } ?? []
+    }
 
     /// The first provider entry (new format), or a synthesized entry from legacy flat fields.
     static var primaryProvider: ProviderEntry? {

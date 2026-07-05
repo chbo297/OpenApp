@@ -8,166 +8,174 @@ import UIKit
 
 // MARK: - Delegate Protocol
 
-public protocol OpenAPPInputBarDelegate: AnyObject {
-    func inputBar(_ bar: OpenAPPInputBar, didSendText text: String)
-    func inputBarDidTapMenu(_ bar: OpenAPPInputBar)
-    func inputBarDidTapVoice(_ bar: OpenAPPInputBar)
-    func inputBarDidTapPlus(_ bar: OpenAPPInputBar)
-    func inputBarDidRequestExpand(_ bar: OpenAPPInputBar)
+/// inputBar frame 拖拽的业务类型，用于区分展开态调整宽度和收起态移动位置。
+public enum OpenAPPInputBarFramePanKind {
+    case expandedResize
+    case collapsedMove
 }
 
+/// inputBar 当前输入源模式：键盘输入或语音输入。
+public enum OpenAPPInputBarInputSource {
+    case keyboard
+    case voice
+}
+
+/// 触发语音输入手势的来源区域，用于外部区分“语音模式按住说话”和“文字模式长按输入区”。
+public enum OpenAPPInputBarVoiceInputSource {
+    case voiceInputArea
+    case textInputLongPress
+}
+
+/// inputBar frame 拖拽结束时传给外部的上下文，外部据此决定最终展开、收起、吸附或自由落位。
+public struct OpenAPPInputBarFramePanEndContext {
+    public let kind: OpenAPPInputBarFramePanKind
+    public let velocity: CGPoint
+    public let frame: CGRect
+
+    /// 收起态 move 结束时，手指是否已经在当前位置附近低速停留足够久；为 true 时外部通常自由落位，不再吸附边缘。
+    public let didHoldNearFinalPosition: Bool
+
+    public init(
+        kind: OpenAPPInputBarFramePanKind,
+        velocity: CGPoint,
+        frame: CGRect,
+        didHoldNearFinalPosition: Bool
+    ) {
+        self.kind = kind
+        self.velocity = velocity
+        self.frame = frame
+        self.didHoldNearFinalPosition = didHoldNearFinalPosition
+    }
+}
+
+/// inputBar 对外事件代理：文本发送、输入源变化、语音手势、展开收起 frame 意图都通过这里通知宿主。
+public protocol OpenAPPInputBarDelegate: AnyObject {
+    func inputBar(_ bar: OpenAPPInputBar, didSendText text: String)
+    func inputBarDidTapVoice(_ bar: OpenAPPInputBar)
+    func inputBarDidTapPlus(_ bar: OpenAPPInputBar)
+    func inputBar(_ bar: OpenAPPInputBar, didChangeInputSource source: OpenAPPInputBarInputSource)
+    func inputBar(_ bar: OpenAPPInputBar, didChangeTextInputFocus isFocused: Bool)
+    func inputBar(
+        _ bar: OpenAPPInputBar,
+        didReceiveVoiceInputGesture gestureRecognizer: UILongPressGestureRecognizer,
+        source: OpenAPPInputBarVoiceInputSource,
+        state: UIGestureRecognizer.State
+    )
+    func inputBarDidRequestExpand(_ bar: OpenAPPInputBar)
+    func inputBarDidRequestCollapse(_ bar: OpenAPPInputBar)
+    func inputBar(
+        _ bar: OpenAPPInputBar,
+        wantsFrame frame: CGRect,
+        panKind kind: OpenAPPInputBarFramePanKind
+    )
+    func inputBar(
+        _ bar: OpenAPPInputBar,
+        didEndFramePan context: OpenAPPInputBarFramePanEndContext
+    )
+}
+
+/// inputBar 代理默认空实现，让宿主只实现自己关心的事件。
 public extension OpenAPPInputBarDelegate {
     func inputBar(_ bar: OpenAPPInputBar, didSendText text: String) {}
-    func inputBarDidTapMenu(_ bar: OpenAPPInputBar) {}
     func inputBarDidTapVoice(_ bar: OpenAPPInputBar) {}
     func inputBarDidTapPlus(_ bar: OpenAPPInputBar) {}
+    func inputBar(_ bar: OpenAPPInputBar, didChangeInputSource source: OpenAPPInputBarInputSource) {}
+    func inputBar(_ bar: OpenAPPInputBar, didChangeTextInputFocus isFocused: Bool) {}
+    func inputBar(
+        _ bar: OpenAPPInputBar,
+        didReceiveVoiceInputGesture gestureRecognizer: UILongPressGestureRecognizer,
+        source: OpenAPPInputBarVoiceInputSource,
+        state: UIGestureRecognizer.State
+    ) {}
     func inputBarDidRequestExpand(_ bar: OpenAPPInputBar) {}
+    func inputBarDidRequestCollapse(_ bar: OpenAPPInputBar) {}
+    func inputBar(
+        _ bar: OpenAPPInputBar,
+        wantsFrame frame: CGRect,
+        panKind kind: OpenAPPInputBarFramePanKind
+    ) {}
+    func inputBar(
+        _ bar: OpenAPPInputBar,
+        didEndFramePan context: OpenAPPInputBarFramePanEndContext
+    ) {}
 }
 
 // MARK: - OpenAPPInputBar
 
-/// Presentation-only capsule: lays out subviews from `bounds.width` and `expandedContentWidth`.
-/// Until the host sets `expandedContentWidth`, layout uses screen width minus `horizontalInset` as the expanded reference (not `bounds.width`).
-/// The host sets `frame` (position, width, keyboard offset). Horizontal collapse/expand pans live on the host, not here.
-/// Built-in: text input, buttons, and vertical drag to dismiss the keyboard while the text field is first responder.
+/// 胶囊输入栏视图：内部负责按钮、输入区、语音输入区布局和手势识别，外部宿主负责最终 frame 约束与落位。
 public final class OpenAPPInputBar: UIView {
 
-    // MARK: - Layout Constants (shared with host for `frame` math)
-    //
-    // 图 A · 宿主 view 与胶囊条外框（由 OpenAPPViewController 设置 frame）
-    //
-    //      |←——— 宿主 view.bounds.width ———→|
-    //      |12|←— expandedContentWidth —→|12|
-    //         |←—— OpenAPPInputBar ——→|
-    //         |← barHeight 56 →|
-    //
-    //      horizontalInset = 12        → 左右两段「12」
-    //      expandedContentWidth = W0    → 中间胶囊条宽度（不含两侧 12）
-    //      barHeight = 56               → 胶囊条高度
-    //
-    // 图 B · 胶囊条内部横向（由 layoutSubviews 排列，单位 pt）
-    //
-    //      |8| M |8|  文本区域  |8| V |8| + |8|
-    //         40     高 36       40    40
-    //
-    //      innerPadding = 8   → 每一段「8」
-    //      buttonSize = 40    → M / V / + 触控区域边长；图标约 26pt
-    //      textFieldHeight    → 「文本区域」高度 36
-    //      textFieldLeadingVisualOffset = -1 → 文本区整体左移 1（视觉微调，图上未画出）
-    //
-    // 图 C · 胶囊条圆角（随收起进度线性增大，完全收起 → min(宽,高)/2，两端半圆）
-    //
-    //      展开  ╭──────────────╮  cornerRadius = 16
-    //      收起  ( ● )          cornerRadius → 28（宽 56、高 56 时）
-    //
-    // 图 D · 完全收起（collapsedMinWidth = 8+40+8 = 56）
-    //
-    //      |8| M |8|
-    //
-    // 图 E · 收起三阶段（layoutSubviews）
-    //
-    //      阶段 1   文本区变窄
-    //      阶段 2   V、+ 贴右不动；M 与 V 间距压到 8（条宽 → widthWithUniformButtonGaps）
-    //      阶段 3   V 盖住 +，再 M 盖住 V（每步 coverTravel = 48）
-    //
-    // 图 F · 竖向拖收键盘（与布局无关）
-    //
-    //      在输入框内竖直拖动 ≥ keyboardDismissAxisThreshold(12) → resignFirstResponder
+    // MARK: - Layout Constants
 
-    /// 图 A：宿主左右留白（pt）。
-    public static let horizontalInset: CGFloat = 12
-
-    /// 图 A：胶囊条高度（pt）。
+    /// 胶囊条默认高度。
     public static let barHeight: CGFloat = 56
 
-    /// 图 B：条内边距与控件间距（pt）。
-    private static let innerPadding: CGFloat = 8
-
-    /// 图 B：menu / voice / plus 边长（pt）。
-    private static let buttonSize: CGFloat = 40
-
-    /// 图 B：voice / plus 的 SF Symbol 字号（与 `buttonSize` 同比例放大）。
-    private static let symbolIconPointSize: CGFloat = 24
-
-    /// 图 D：完全收起时的条宽（pt）。
+    /// 完全收起宽度：8 + 40 + 8。
     public static var collapsedMinWidth: CGFloat { innerPadding * 2 + buttonSize }
 
-    /// 图 E 前：三按钮间距均为 innerPadding 时的条宽（|8|M|8|V|8|+|8| = 4×8 + 3×40）。
-    public static var widthWithUniformButtonGaps: CGFloat {
-        innerPadding * 4 + buttonSize * 3
+    /// 最小展开宽度：8 + 40 + 8 + 80 + 8 + 40 + 8 + 40 + 8。
+    public static var minimumExpandedWidth: CGFloat {
+        innerPadding * 5 + buttonSize * 3 + minimumInputAreaWidth
     }
 
-    /// 图 C：展开态圆角（pt）；收起态在 `layoutSubviews` 中插值到 `min(宽,高)/2`。
+    private static let innerPadding: CGFloat = 8
+    private static let buttonSize: CGFloat = 40
+    private static let minimumInputAreaWidth: CGFloat = 80
+    private static let symbolIconPointSize: CGFloat = 24
+    private static let keyboardIconPointSize: CGFloat = 17
     private static let expandedCornerRadius: CGFloat = 16
+    private static let inactiveTextInputPlaceholder = "发消息或按住说话..."
+    private static let activeTextInputPlaceholder = "发消息..."
 
-    /// 图 B：文本区 X 微调（pt，负值表示略向左）。
-    private let textFieldLeadingVisualOffset: CGFloat = -1
+    private static let normalZeroInputAreaWidth: CGFloat = innerPadding * 5 + buttonSize * 3
+    private static let compressedTextGapWidth: CGFloat = innerPadding * 4 + buttonSize * 3
+    private static let collapsedPlusVisibleWidth: CGFloat = innerPadding * 3 + buttonSize * 2
 
-    /// 图 B：文本输入区高度（pt）。
-    private let textFieldHeight: CGFloat = 36
+    private static let panDirectionThreshold: CGFloat = 6
+    private static let collapsedHoldPositionThreshold: CGFloat = 4
+    private static let collapsedHoldDuration: TimeInterval = 0.3
+    private static let collapsedHoldSlowVelocityThreshold: CGFloat = 50
+    private static let resizeToCollapsedMoveHoldDuration: TimeInterval = 0.1
 
-    /// 图 F：判定竖向拖动的最小位移（pt）。
-    private let keyboardDismissAxisThreshold: CGFloat = 12
+    private let inputAreaHeight: CGFloat = 36
 
-    /// 图 E：相邻按钮完全重叠的一档水平行程（pt）。
-    private var coverTravel: CGFloat { Self.buttonSize + Self.innerPadding }
+    // MARK: - State
 
-    // MARK: - Host-provided layout reference
-    //
-    // 图 A 中的 W0：宿主 layoutInputBar() 写入；Bar 用来算文本区最大宽度与收起进度。
-    // 写入前为 0，临时用「屏幕宽 − 2×horizontalInset」占位。
-
-    /// 图 A：展开态胶囊内容宽度 W0（pt，不含两侧 horizontalInset）。
-    public var expandedContentWidth: CGFloat = 0
-
-    /// 宿主是否已写入 W0（expandedContentWidth > 0）。
-    public var hasHostExpandedContentWidth: Bool { expandedContentWidth > 0 }
-
-    /// Reference width for collapse math: host value when set, otherwise screen width minus horizontal insets.
-    private var effectiveExpandedContentWidth: CGFloat {
-        if hasHostExpandedContentWidth { return expandedContentWidth }
-        return Self.placeholderExpandedContentWidth(for: self)
+    /// pan 手势首次明确后的方向，用于把横向 resize/move 和竖向键盘焦点手势区分开。
+    private enum InputBarPanDirection {
+        case undecided
+        case horizontal
+        case vertical
     }
 
-    public var isCollapsed: Bool {
-        let maxDelta = maxCollapseDelta
-        guard maxDelta > 0 else { return false }
-        let collapseDelta = max(0, effectiveExpandedContentWidth - bounds.width)
-        return collapseDelta >= maxDelta - 0.5
+    /// pan 手势的起手区域，用于决定同一组手势位移应该触发 menu resize/move、输入区焦点还是普通 bar 行为。
+    private enum InputBarPanStartRegion {
+        case bar
+        case menuButton
+        case inputArea
     }
 
-    private var maxCollapseDelta: CGFloat {
-        max(0, effectiveExpandedContentWidth - Self.collapsedMinWidth)
+    /// pan 手势在本次交互中锁定的处理模式，锁定后不再根据后续移动重新改判。
+    private enum InputBarPanMode {
+        case undecided
+        case expandedMenuResize
+        case collapsedMenuMove
+        case textInputFocus
+        case ignored
     }
 
-    /// 收起进度 0（展开）… 1（完全收起），与 `inputBarCollapseDelta / cap` 一致。
-    private var collapseProgress: CGFloat {
-        let cap = maxCollapseDelta
-        guard cap > 0 else { return 0 }
-        let delta = max(0, effectiveExpandedContentWidth - bounds.width)
-        return min(1, max(0, delta / cap))
-    }
-
-    /// 随 `collapseProgress` 线性增大圆角；完全收起时为 `min(bounds.width, bounds.height) / 2`（整体呈圆形/药丸形）。
-    private func updateCapsuleCornerRadius() {
-        let collapsedRadius = min(bounds.width, bounds.height) / 2
-        let radius = Self.expandedCornerRadius
-            + (collapsedRadius - Self.expandedCornerRadius) * collapseProgress
-        if abs(layer.cornerRadius - radius) > 0.25 {
-            layer.cornerRadius = radius
-        }
-    }
-
-    /// Placeholder expanded width before the host lays out: `screenWidth - 2×horizontalInset` (not `bounds.width`).
-    public static func placeholderExpandedContentWidth(for view: UIView) -> CGFloat {
-        let screenWidth: CGFloat
-        if let window = view.window {
-            screenWidth = window.bounds.width
-        } else {
-            screenWidth = UIScreen.main.bounds.width
-        }
-        return max(0, screenWidth - horizontalInset * 2)
-    }
+    private var lastLaidOutSize: CGSize = .zero
+    private var inputBarPanStartRegion: InputBarPanStartRegion = .bar
+    private var inputBarPanMode: InputBarPanMode = .undecided
+    private var inputBarPanStartedCollapsed = false
+    private var inputBarPanAnchorFrame: CGRect = .zero
+    private var inputBarPanAnchorTranslation: CGPoint = .zero
+    private var collapsedHoldAnchorCenter: CGPoint = .zero
+    private var collapsedHoldStartTime: TimeInterval?
+    private var resizeCollapsedHoldStartTime: TimeInterval?
+    private var isHoldingVoiceInput = false
+    private var activeVoiceInputSource: OpenAPPInputBarVoiceInputSource?
+    private weak var activeVoiceInputGestureRecognizer: UILongPressGestureRecognizer?
 
     // MARK: - Delegate
 
@@ -176,16 +184,33 @@ public final class OpenAPPInputBar: UIView {
     // MARK: - Subviews
 
     public let menuButton = OpenAPPMenuButton()
-    public let textFieldClipContainer = UIView()
+    public let inputAreaContainer = UIView()
     public let textField = OpenAPPTextField()
-    public let voiceButton = UIButton(type: .system)
+    public let voiceInputHoldButton = UIButton(type: .custom)
+    public let inputSourceButton = UIButton(type: .system)
     public let plusButton = UIButton(type: .system)
 
-    private lazy var keyboardDismissPan: UIPanGestureRecognizer = {
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleKeyboardDismissPan(_:)))
-        pan.cancelsTouchesInView = false
+    private lazy var inputBarPan: UIPanGestureRecognizer = {
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleInputBarPan(_:)))
+        pan.cancelsTouchesInView = true
         pan.delegate = self
         return pan
+    }()
+
+    private lazy var voiceInputPress: UILongPressGestureRecognizer = {
+        let press = UILongPressGestureRecognizer(target: self, action: #selector(handleVoiceInputPress(_:)))
+        press.minimumPressDuration = 0
+        press.cancelsTouchesInView = true
+        press.delegate = self
+        return press
+    }()
+
+    private lazy var textInputVoiceLongPress: UILongPressGestureRecognizer = {
+        let press = UILongPressGestureRecognizer(target: self, action: #selector(handleTextInputVoiceLongPress(_:)))
+        press.minimumPressDuration = 0.1
+        press.cancelsTouchesInView = true
+        press.delegate = self
+        return press
     }()
 
     // MARK: - Public API
@@ -195,6 +220,12 @@ public final class OpenAPPInputBar: UIView {
         set { textField.text = newValue }
     }
 
+    public private(set) var inputSource: OpenAPPInputBarInputSource = .keyboard
+
+    public var isCollapsed: Bool {
+        bounds.width <= Self.collapsedMinWidth + 0.5
+    }
+
     public func clearText() {
         textField.text = ""
     }
@@ -202,9 +233,38 @@ public final class OpenAPPInputBar: UIView {
     public func setInputEnabled(_ enabled: Bool) {
         textField.isEnabled = enabled
         menuButton.isEnabled = enabled
-        voiceButton.isEnabled = enabled
+        inputSourceButton.isEnabled = enabled
+        voiceInputHoldButton.isEnabled = enabled
         plusButton.isEnabled = enabled
         updateCollapsedInteractionState()
+    }
+
+    public func setInputSource(_ source: OpenAPPInputBarInputSource, animated: Bool) {
+        setInputSource(source, animated: animated, focusKeyboard: false)
+    }
+
+    public func setInputBarFrame(_ frame: CGRect, animated: Bool) {
+        guard !Self.isFrame(self.frame, effectivelyEqualTo: frame) else { return }
+
+        let sizeWillChange = !Self.isSize(bounds.size, effectivelyEqualTo: frame.size)
+        let apply = {
+            self.frame = frame
+            if sizeWillChange {
+                self.setNeedsLayout()
+                self.layoutIfNeeded()
+            }
+        }
+
+        if animated {
+            UIView.animate(
+                withDuration: 0.24,
+                delay: 0,
+                options: [.curveEaseOut, .allowUserInteraction],
+                animations: apply
+            )
+        } else {
+            apply()
+        }
     }
 
     // MARK: - Init
@@ -219,8 +279,12 @@ public final class OpenAPPInputBar: UIView {
         setup()
     }
 
-    private static func systemSymbolImage(primary: String, fallbacks: [String] = []) -> UIImage? {
-        let config = UIImage.SymbolConfiguration(pointSize: symbolIconPointSize, weight: .regular)
+    private static func systemSymbolImage(
+        primary: String,
+        fallbacks: [String] = [],
+        pointSize: CGFloat = symbolIconPointSize
+    ) -> UIImage? {
+        let config = UIImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
         for name in [primary] + fallbacks {
             if let image = UIImage(systemName: name, withConfiguration: config) {
                 return image
@@ -230,182 +294,680 @@ public final class OpenAPPInputBar: UIView {
     }
 
     private func setup() {
-        backgroundColor = .systemBackground
         layer.cornerRadius = Self.expandedCornerRadius
         layer.masksToBounds = false
-        layer.shadowColor = UIColor.black.cgColor
-        layer.shadowOpacity = 0.1
         layer.shadowRadius = 8
         layer.shadowOffset = CGSize(width: 0, height: -2)
+        layer.borderWidth = 1
 
         plusButton.setImage(
             Self.systemSymbolImage(primary: "plus.circle", fallbacks: ["plus"]),
             for: .normal
         )
-        plusButton.tintColor = .label
         plusButton.addTarget(self, action: #selector(plusTapped), for: .touchUpInside)
 
-        voiceButton.setImage(
-            Self.systemSymbolImage(primary: "microphone.circle", fallbacks: ["microphone"]),
-            for: .normal
-        )
-        voiceButton.tintColor = .label
-        voiceButton.addTarget(self, action: #selector(voiceTapped), for: .touchUpInside)
+        inputSourceButton.addTarget(self, action: #selector(inputSourceTapped), for: .touchUpInside)
 
-        textFieldClipContainer.clipsToBounds = true
+        inputAreaContainer.clipsToBounds = true
 
-        textField.placeholder = "发消息或按住说话..."
+        textField.placeholder = Self.inactiveTextInputPlaceholder
         textField.font = .systemFont(ofSize: 15)
         textField.returnKeyType = .send
         textField.borderStyle = .none
         textField.delegate = self
 
+        voiceInputHoldButton.setTitle("按住说话", for: .normal)
+        voiceInputHoldButton.titleLabel?.font = .boldSystemFont(ofSize: 16)
+        voiceInputHoldButton.titleLabel?.textAlignment = .center
+        voiceInputHoldButton.contentHorizontalAlignment = .center
+        voiceInputHoldButton.layer.cornerRadius = inputAreaHeight / 2
+        voiceInputHoldButton.layer.masksToBounds = true
+        voiceInputHoldButton.adjustsImageWhenHighlighted = false
+        voiceInputHoldButton.accessibilityLabel = "按住说话"
+        voiceInputHoldButton.addGestureRecognizer(voiceInputPress)
+        inputAreaContainer.addGestureRecognizer(textInputVoiceLongPress)
+
         menuButton.addTarget(self, action: #selector(menuTapped), for: .touchUpInside)
 
         addSubview(plusButton)
-        addSubview(voiceButton)
-        addSubview(textFieldClipContainer)
-        textFieldClipContainer.addSubview(textField)
+        addSubview(inputSourceButton)
+        addSubview(inputAreaContainer)
+        inputAreaContainer.addSubview(textField)
+        inputAreaContainer.addSubview(voiceInputHoldButton)
         addSubview(menuButton)
+        addGestureRecognizer(inputBarPan)
 
-        addGestureRecognizer(keyboardDismissPan)
-
+        applyAppearance()
+        updateInputSourceAppearance(animated: false, notifyDelegate: false)
         updateCollapsedInteractionState()
+    }
+
+    public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        applyAppearance()
+    }
+
+    private func applyAppearance() {
+        backgroundColor = OpenAPPAppearance.inputBarBackground
+        layer.borderColor = OpenAPPAppearance.inputBarBorder.resolvedColor(with: traitCollection).cgColor
+        layer.shadowColor = OpenAPPAppearance.inputBarShadow.resolvedColor(with: traitCollection).cgColor
+        layer.shadowOpacity = OpenAPPAppearance.inputBarShadowOpacity(for: traitCollection)
+
+        textField.textColor = OpenAPPAppearance.primaryText
+        textField.tintColor = OpenAPPAppearance.accent
+        updateTextFieldPlaceholder()
+        plusButton.tintColor = OpenAPPAppearance.icon
+        inputSourceButton.tintColor = OpenAPPAppearance.icon
+        voiceInputHoldButton.setTitleColor(OpenAPPAppearance.primaryText, for: .normal)
+        setVoiceInputHolding(isHoldingVoiceInput)
+        menuButton.setNeedsDisplay()
+    }
+
+    // MARK: - Layout
+
+    public override func layoutSubviews() {
+        super.layoutSubviews()
+
+        let size = bounds.size
+        guard size.width > 0, size.height > 0 else { return }
+        guard size != lastLaidOutSize else { return }
+        lastLaidOutSize = size
+
+        layoutContent(for: size)
+        updateCapsuleCornerRadius(for: size)
+        updateCollapsedInteractionState()
+    }
+
+    private func layoutContent(for size: CGSize) {
+        let width = max(size.width, Self.collapsedMinWidth)
+        let contentY = size.height >= Self.barHeight ? (size.height - Self.barHeight) / 2 : 0
+        let buttonY = contentY + (Self.barHeight - Self.buttonSize) / 2
+        let inputAreaY = contentY + (Self.barHeight - inputAreaHeight) / 2
+
+        let menuX = Self.innerPadding
+        let inputAreaX: CGFloat
+        let inputAreaWidth: CGFloat
+        let inputSourceX: CGFloat
+        let plusX: CGFloat
+
+        if width >= Self.normalZeroInputAreaWidth {
+            inputAreaX = menuX + Self.buttonSize + Self.innerPadding
+            inputAreaWidth = width - Self.normalZeroInputAreaWidth
+            plusX = width - Self.innerPadding - Self.buttonSize
+            inputSourceX = plusX - Self.innerPadding - Self.buttonSize
+        } else if width >= Self.compressedTextGapWidth {
+            let compressedMenuTextGap = width - Self.compressedTextGapWidth
+            inputAreaX = menuX + Self.buttonSize + compressedMenuTextGap
+            inputAreaWidth = 0
+            inputSourceX = inputAreaX + Self.innerPadding
+            plusX = inputSourceX + Self.buttonSize + Self.innerPadding
+        } else if width >= Self.collapsedPlusVisibleWidth {
+            inputAreaX = menuX + Self.buttonSize
+            inputAreaWidth = 0
+            inputSourceX = width - Self.buttonSize * 2 - Self.innerPadding * 2
+            plusX = width - Self.buttonSize - Self.innerPadding
+        } else {
+            inputAreaX = menuX + Self.buttonSize
+            inputAreaWidth = 0
+            inputSourceX = menuX
+            plusX = width - Self.buttonSize - Self.innerPadding
+        }
+
+        inputAreaContainer.frame = CGRect(
+            x: inputAreaX,
+            y: inputAreaY,
+            width: max(0, inputAreaWidth),
+            height: inputAreaHeight
+        )
+        textField.frame = CGRect(
+            x: 0,
+            y: 0,
+            width: max(inputAreaWidth, Self.minimumInputAreaWidth),
+            height: inputAreaHeight
+        )
+        voiceInputHoldButton.frame = CGRect(
+            x: 0,
+            y: 0,
+            width: max(inputAreaWidth, Self.minimumInputAreaWidth),
+            height: inputAreaHeight
+        )
+
+        plusButton.frame = CGRect(x: plusX, y: buttonY, width: Self.buttonSize, height: Self.buttonSize)
+        inputSourceButton.frame = CGRect(x: inputSourceX, y: buttonY, width: Self.buttonSize, height: Self.buttonSize)
+        menuButton.frame = CGRect(x: menuX, y: buttonY, width: Self.buttonSize, height: Self.buttonSize)
+
+        inputAreaContainer.alpha = inputAreaWidth > 0.5 ? 1 : 0
+        inputSourceButton.alpha = Self.clamp(
+            (width - Self.collapsedPlusVisibleWidth)
+                / (Self.compressedTextGapWidth - Self.collapsedPlusVisibleWidth),
+            0,
+            1
+        )
+        plusButton.alpha = Self.clamp(
+            (width - Self.collapsedMinWidth)
+                / (Self.collapsedPlusVisibleWidth - Self.collapsedMinWidth),
+            0,
+            1
+        )
+    }
+
+    private func updateCapsuleCornerRadius(for size: CGSize) {
+        let width = max(size.width, Self.collapsedMinWidth)
+        let expandedTravel = Self.minimumExpandedWidth - Self.collapsedMinWidth
+        let expandedProgress = Self.clamp((width - Self.collapsedMinWidth) / expandedTravel, 0, 1)
+        let cornerRadiusCollapseRatio = 1 - expandedProgress
+        let collapsedRadius = min(width, size.height) / 2
+        let radius = Self.expandedCornerRadius
+            + (collapsedRadius - Self.expandedCornerRadius) * cornerRadiusCollapseRatio
+
+        if abs(layer.cornerRadius - radius) > 0.25 {
+            layer.cornerRadius = radius
+        }
     }
 
     private func updateCollapsedInteractionState() {
         let collapsed = isCollapsed
-        textField.isUserInteractionEnabled = textField.isEnabled && !collapsed
-        voiceButton.isUserInteractionEnabled = voiceButton.isEnabled && !collapsed && voiceButton.alpha > 0.01
+        textField.isUserInteractionEnabled = textField.isEnabled && !collapsed && inputSource == .keyboard
+        voiceInputHoldButton.isUserInteractionEnabled = voiceInputHoldButton.isEnabled
+            && !collapsed
+            && inputSource == .voice
+            && inputAreaContainer.alpha > 0.01
+        inputSourceButton.isUserInteractionEnabled = inputSourceButton.isEnabled
+            && !collapsed
+            && inputSourceButton.alpha > 0.01
         plusButton.isUserInteractionEnabled = plusButton.isEnabled && !collapsed && plusButton.alpha > 0.01
-        textField.alpha = collapsed ? 0 : 1
     }
 
-    /// 展开态参考宽度下，文本裁剪区允许的最大宽度（与当前 `bounds.width` 无关）。
-    private func textFieldMaxWidth(atExpandedWidth referenceExpandedWidth: CGFloat) -> CGFloat {
-        let textFieldLeadingX = Self.innerPadding + Self.buttonSize + Self.innerPadding + textFieldLeadingVisualOffset
-        let plusLeadingXAtExpanded = referenceExpandedWidth - Self.innerPadding - Self.buttonSize
-        let voiceLeadingXAtExpanded = plusLeadingXAtExpanded - Self.innerPadding - Self.buttonSize
-        return max(0, voiceLeadingXAtExpanded - Self.innerPadding - textFieldLeadingX)
+    private func setInputSource(
+        _ source: OpenAPPInputBarInputSource,
+        animated: Bool,
+        focusKeyboard: Bool
+    ) {
+        guard inputSource != source else {
+            updateInputSourceAppearance(animated: animated, notifyDelegate: false)
+            if focusKeyboard, source == .keyboard {
+                textField.becomeFirstResponder()
+            }
+            return
+        }
+
+        if inputSource == .voice {
+            finishActiveVoiceInput(state: .cancelled, gestureRecognizer: nil)
+        }
+
+        inputSource = source
+        if source == .voice {
+            textField.resignFirstResponder()
+        }
+        updateInputSourceAppearance(animated: animated, notifyDelegate: true)
+        if focusKeyboard, source == .keyboard {
+            textField.becomeFirstResponder()
+        }
     }
 
-    public override func layoutSubviews() {
-        super.layoutSubviews() // 执行系统默认子视图布局
-        updateCapsuleCornerRadius() // 圆角随收起进度更新（动画由宿主 layout 驱动）
+    private func updateInputSourceAppearance(
+        animated: Bool,
+        notifyDelegate: Bool
+    ) {
+        let keyboardMode = inputSource == .keyboard
+        let sourceIcon = keyboardMode
+            ? Self.systemSymbolImage(primary: "microphone.circle", fallbacks: ["microphone"])
+            : Self.systemSymbolImage(
+                primary: "keyboard.circle",
+                fallbacks: ["keyboard"],
+                pointSize: Self.keyboardIconPointSize
+            )
+        inputSourceButton.setImage(sourceIcon, for: .normal)
+        inputSourceButton.accessibilityLabel = keyboardMode ? "切换到语音输入" : "切换到键盘输入"
 
-        let currentBarWidth = bounds.width // 当前胶囊条宽度（宿主设置的 frame.width）
-        let currentBarHeight = bounds.height // 当前胶囊条高度
-        let referenceExpandedWidth = max(currentBarWidth, effectiveExpandedContentWidth) // 展开态参考宽度（不小于当前宽度）
-        let collapseWidthDelta = max(0, referenceExpandedWidth - currentBarWidth) // 比展开态窄了多少 pt
-        let menuLeadingX = Self.innerPadding // 菜单按钮展开态左边缘（恒定）
-        let textFieldLeadingX = menuLeadingX + Self.buttonSize + Self.innerPadding + textFieldLeadingVisualOffset // 文本裁剪区左边缘
-        let textFieldMaxWidthAtExpanded = textFieldMaxWidth(atExpandedWidth: referenceExpandedWidth) // 展开态文本最大可见宽度
+        textField.isHidden = !keyboardMode
+        textField.alpha = 1
+        voiceInputHoldButton.isHidden = keyboardMode
+        voiceInputHoldButton.alpha = 1
+        inputAreaContainer.bringSubviewToFront(voiceInputHoldButton)
+        updateTextFieldPlaceholder()
+        updateCollapsedInteractionState()
 
-        // —— 阶段 1：先收起文本输入区域 ——
-        let textFieldShrink = min(collapseWidthDelta, textFieldMaxWidthAtExpanded) // 本阶段消耗的收起量（不超过文本最大宽度）
-        let textFieldClipWidth = max(0, textFieldMaxWidthAtExpanded - textFieldShrink) // 文本裁剪容器可见宽度
-        var remainingCollapse = max(0, collapseWidthDelta - textFieldShrink) // 文本收完后剩余的收起量
-
-        // —— 阶段 2：压短 menu↔voice 间距（voice、plus 始终贴右；menu 贴左；三键间距均变为 innerPadding）——
-        let widthAfterTextCollapse = referenceExpandedWidth - textFieldShrink // 阶段 1 结束时的条宽
-        let buttonGapSqueezeTravel = max(0, widthAfterTextCollapse - Self.widthWithUniformButtonGaps) // 本阶段最多消耗的收起量
-        let buttonGapSqueezeAmount = min(remainingCollapse, buttonGapSqueezeTravel) // 实际用于压间距的收起量
-        remainingCollapse -= buttonGapSqueezeAmount // 间距压到 8 之后剩余的收起量
-
-        // —— 阶段 3：折叠按钮（plus 压 voice，再 menu 压 voice）——
-        let buttonOverlapTravel = max(1e-6, coverTravel) // 完全遮盖相邻按钮需滑动的距离（buttonSize + innerPadding）
-        let plusOverlapAmount = min(remainingCollapse, buttonOverlapTravel) // 用于 plus 盖住 voice 的收起量
-        remainingCollapse -= plusOverlapAmount // 扣除 plus 层已用掉的收起量
-        let plusOverlapProgress = plusOverlapAmount / buttonOverlapTravel // plus 覆盖 voice 的进度 0…1
-
-        let voiceOverlapAmount = min(remainingCollapse, buttonOverlapTravel) // 用于 menu 盖住 voice 的收起量
-        let voiceOverlapProgress = voiceOverlapAmount / buttonOverlapTravel // menu 覆盖 voice 的进度 0…1
-
-        let buttonCenterY = (currentBarHeight - Self.buttonSize) / 2 // 圆形按钮垂直居中 Y
-        let plusTrailingEdge = currentBarWidth - Self.innerPadding // plus 右边缘（距条右 innerPadding）
-        let plusLeadingX = plusTrailingEdge - Self.buttonSize // plus 左边缘（贴右，阶段 2 起不变）
-        // voice 贴 plus 左侧 innerPadding；阶段 2 仅随条宽右缘内收，阶段 3 再向右叠到 plus 上
-        let voiceLeadingXBeforeOverlap = plusLeadingX - Self.innerPadding - Self.buttonSize
-
-        textFieldClipContainer.frame = CGRect(
-            x: textFieldLeadingX, // 裁剪容器 X：展开态文本起始位置
-            y: (currentBarHeight - textFieldHeight) / 2, // 裁剪容器 Y：文本垂直居中
-            width: textFieldClipWidth, // 裁剪容器宽度（随收起变窄）
-            height: textFieldHeight // 裁剪容器高度
-        )
-        textField.frame = CGRect(
-            x: 0, // 相对裁剪容器原点
-            y: 0,
-            width: textFieldMaxWidthAtExpanded, // 内部文本保持展开宽度，由容器裁剪
-            height: textFieldHeight // 文本高度
-        )
-
-        let voiceLeadingX = voiceLeadingXBeforeOverlap
-            + plusOverlapProgress * (plusLeadingX - voiceLeadingXBeforeOverlap) // 阶段 3：voice 向右叠到 plus
-        voiceButton.frame = CGRect(
-            x: voiceLeadingX, // 语音按钮 X
-            y: buttonCenterY, // 语音按钮 Y
-            width: Self.buttonSize, // 语音按钮宽
-            height: Self.buttonSize // 语音按钮高
-        )
-        plusButton.frame = CGRect(
-            x: plusLeadingX, // 加号按钮 X（贴右）
-            y: buttonCenterY,
-            width: Self.buttonSize,
-            height: Self.buttonSize
-        )
-
-        plusButton.alpha = 1 - plusOverlapProgress // plus 被盖住时渐隐（由 voice 在上）
-        voiceButton.alpha = 1 - voiceOverlapProgress // voice 被盖住时渐隐（由 menu 在上）
-
-        let menuSlide = voiceOverlapProgress * max(
-            0,
-            voiceLeadingXBeforeOverlap - menuLeadingX - Self.buttonSize
-        ) // 阶段 3：menu 向右推移量（跟随 voice 被盖住的程度）
-        let menuLeadingXFinal = menuLeadingX + menuSlide // menu 最终左边缘
-        menuButton.frame = CGRect(
-            x: menuLeadingXFinal, // 菜单按钮 X
-            y: buttonCenterY,
-            width: Self.buttonSize,
-            height: Self.buttonSize
-        )
-
-        updateCollapsedInteractionState() // 收起态：禁用文本/侧键并更新透明度
+        if notifyDelegate {
+            delegate?.inputBar(self, didChangeInputSource: inputSource)
+        }
     }
+
+    private func updateTextFieldPlaceholder() {
+        let text = textField.isFirstResponder
+            ? Self.activeTextInputPlaceholder
+            : Self.inactiveTextInputPlaceholder
+        textField.attributedPlaceholder = NSAttributedString(
+            string: text,
+            attributes: [.foregroundColor: OpenAPPAppearance.placeholderText]
+        )
+    }
+
+    private func setVoiceInputHolding(_ holding: Bool) {
+        voiceInputHoldButton.backgroundColor = holding
+            ? OpenAPPAppearance.voicePressedBackground
+            : .clear
+        voiceInputHoldButton.setTitleColor(OpenAPPAppearance.primaryText, for: .normal)
+    }
+
+    // MARK: - Actions
 
     @objc private func menuTapped() {
         if isCollapsed {
             delegate?.inputBarDidRequestExpand(self)
-            return
+        } else {
+            delegate?.inputBarDidRequestCollapse(self)
         }
-        delegate?.inputBarDidTapMenu(self)
     }
 
-    @objc private func voiceTapped() {
-        delegate?.inputBarDidTapVoice(self)
+    @objc private func inputSourceTapped() {
+        switch inputSource {
+        case .keyboard:
+            setInputSource(.voice, animated: true, focusKeyboard: false)
+        case .voice:
+            setInputSource(.keyboard, animated: true, focusKeyboard: true)
+        }
     }
 
     @objc private func plusTapped() {
         delegate?.inputBarDidTapPlus(self)
     }
 
-    @objc private func handleKeyboardDismissPan(_ gr: UIPanGestureRecognizer) {
-        guard textField.isFirstResponder else { return }
-        let t = gr.translation(in: self)
+    @objc private func handleVoiceInputPress(_ gr: UILongPressGestureRecognizer) {
+        handleVoiceInputGesture(gr, source: .voiceInputArea)
+    }
+
+    @objc private func handleTextInputVoiceLongPress(_ gr: UILongPressGestureRecognizer) {
+        handleVoiceInputGesture(gr, source: .textInputLongPress)
+    }
+
+    private func handleVoiceInputGesture(
+        _ gr: UILongPressGestureRecognizer,
+        source: OpenAPPInputBarVoiceInputSource
+    ) {
         switch gr.state {
+        case .began:
+            beginVoiceInput(source: source, gestureRecognizer: gr)
         case .changed:
-            if abs(t.y) >= keyboardDismissAxisThreshold, abs(t.y) >= abs(t.x) * 0.85 {
-                textField.resignFirstResponder()
-            }
+            guard isHoldingVoiceInput, activeVoiceInputSource == source else { return }
+            delegate?.inputBar(self, didReceiveVoiceInputGesture: gr, source: source, state: gr.state)
+        case .ended:
+            finishActiveVoiceInput(state: gr.state, gestureRecognizer: gr)
+        case .cancelled, .failed:
+            finishActiveVoiceInput(state: gr.state, gestureRecognizer: gr)
         default:
             break
         }
+    }
+
+    private func beginVoiceInput(
+        source: OpenAPPInputBarVoiceInputSource,
+        gestureRecognizer: UILongPressGestureRecognizer
+    ) {
+        guard canBeginVoiceInput(source: source) else { return }
+
+        if source == .textInputLongPress {
+            textField.resignFirstResponder()
+        }
+
+        isHoldingVoiceInput = true
+        activeVoiceInputSource = source
+        activeVoiceInputGestureRecognizer = gestureRecognizer
+        setVoiceInputHolding(source == .voiceInputArea)
+
+        delegate?.inputBar(
+            self,
+            didReceiveVoiceInputGesture: gestureRecognizer,
+            source: source,
+            state: gestureRecognizer.state
+        )
+    }
+
+    private func finishActiveVoiceInput(
+        state: UIGestureRecognizer.State,
+        gestureRecognizer: UILongPressGestureRecognizer?
+    ) {
+        guard isHoldingVoiceInput,
+              let source = activeVoiceInputSource else { return }
+
+        let gestureToSend = gestureRecognizer ?? activeVoiceInputGestureRecognizer
+        let delegateState: UIGestureRecognizer.State = gestureRecognizer == nil ? .cancelled : state
+        isHoldingVoiceInput = false
+        activeVoiceInputSource = nil
+        activeVoiceInputGestureRecognizer = nil
+        setVoiceInputHolding(false)
+
+        if let gestureToSend {
+            delegate?.inputBar(
+                self,
+                didReceiveVoiceInputGesture: gestureToSend,
+                source: source,
+                state: delegateState
+            )
+        }
+    }
+
+    private func canBeginVoiceInput(source: OpenAPPInputBarVoiceInputSource) -> Bool {
+        guard !isCollapsed,
+              !isHoldingVoiceInput,
+              textField.isEnabled,
+              inputAreaContainer.alpha > 0.01 else {
+            return false
+        }
+
+        switch source {
+        case .voiceInputArea:
+            return inputSource == .voice && voiceInputHoldButton.isEnabled
+        case .textInputLongPress:
+            return inputSource == .keyboard
+        }
+    }
+
+    // MARK: - Input Bar Pan
+
+    @objc private func handleInputBarPan(_ gr: UIPanGestureRecognizer) {
+        // 手指状态：pan 手势发生在 inputBar 所在宿主视图坐标系中，后续 frame 计算都以宿主视图为基准。
+        guard let hostView = superview else { return }
+
+        switch gr.state {
+        case .began:
+            // 手指阶段：刚按下并开始拖拽，记录本次 pan 的初始状态。
+            beginInputBarPan(gr, in: hostView)
+
+        case .changed:
+            // 手指阶段：手指移动中，根据已锁定模式提出 frame 变化意图或处理键盘焦点。
+            updateInputBarPan(gr, in: hostView)
+
+        case .ended, .cancelled, .failed:
+            // 手指阶段：手指抬起、系统取消或手势失败，按模式做最终结算并清理状态。
+            finishInputBarPan(gr, in: hostView)
+
+        default:
+            // 手指阶段：其它 UIKit 状态不参与 inputBar 的展开、收起、移动或键盘处理。
+            break
+        }
+    }
+
+    private func beginInputBarPan(_ gr: UIPanGestureRecognizer, in hostView: UIView) {
+        // 手指阶段：刚按下并开始拖拽，记录本次手势开始时 inputBar 是否已经是收起态。
+        inputBarPanStartedCollapsed = isCollapsed
+
+        // 手指阶段：新一轮手势还没有确定用途，先清空上一轮留下的模式。
+        inputBarPanMode = .undecided
+
+        // 手指状态：当前手指相对手势开始点的总位移，用作本次 pan 的锚点。
+        let translation = gr.translation(in: hostView)
+
+        // 手指阶段：记录拖拽起点的 frame 和 translation，后续所有跟手变化都从这个锚点增量计算。
+        inputBarPanAnchorFrame = frame
+        inputBarPanAnchorTranslation = translation
+
+        // 手指阶段：初始化收起态停留计时，用于判断手指抬起时是否需要自由落位。
+        resetCollapsedHoldTracking(center: frame.center)
+
+        // 手指阶段：初始化“展开 resize 拖到收起态后切换为 move”的停留计时。
+        resetResizeCollapsedHoldTracking()
+    }
+
+    private func updateInputBarPan(_ gr: UIPanGestureRecognizer, in hostView: UIView) {
+        // 手指状态：当前手指相对手势开始点的总位移，用于判断方向、跟手 resize 或跟手移动。
+        let translation = gr.translation(in: hostView)
+
+        // 手指阶段：手指移动中，计算从本次 pan 锚点开始的实际位移。
+        let delta = inputBarPanDelta(from: translation)
+
+        // 手指阶段：如果本次手势还没有确定用途，根据起始区域和首次明确方向锁定模式。
+        resolveInputBarPanModeIfNeeded(delta: delta)
+
+        // 手指阶段：frame 变化和键盘焦点各自处理；不符合当前模式的方法会直接返回。
+        proposeFrameChangeIfNeeded(delta: delta, translation: translation)
+        updateTextInputFocusPanIfNeeded(delta: delta)
+    }
+
+    private func finishInputBarPan(_ gr: UIPanGestureRecognizer, in hostView: UIView) {
+        // 手指阶段：手指结束时只结算会改变 frame 的 pan，键盘焦点和 ignored 不需要外部落位策略。
+        finishFramePanIfNeeded(velocity: gr.velocity(in: hostView))
+
+        // 手指阶段：本次 pan 已结束，清理状态，避免影响下一次手势判断。
+        resetInputBarPanState()
+    }
+
+    private func updateTextInputFocusPanIfNeeded(delta: CGPoint) {
+        guard inputBarPanMode == .textInputFocus else { return }
+
+        if delta.y > 0, textField.isFirstResponder {
+            textField.resignFirstResponder()
+            return
+        }
+
+        if delta.y < 0,
+           inputBarPanStartRegion == .inputArea,
+           inputSource == .keyboard,
+           !textField.isFirstResponder {
+            textField.becomeFirstResponder()
+        }
+    }
+
+    private func proposeFrameChangeIfNeeded(delta: CGPoint, translation: CGPoint) {
+        switch inputBarPanMode {
+        case .expandedMenuResize:
+            proposeExpandedResizeFrameChange(delta: delta, translation: translation)
+        case .collapsedMenuMove:
+            proposeCollapsedMoveFrameChange(delta: delta)
+        case .undecided, .textInputFocus, .ignored:
+            break
+        }
+    }
+
+    private func proposeExpandedResizeFrameChange(delta: CGPoint, translation: CGPoint) {
+        let proposedFrame = expandedResizeFrame(deltaX: delta.x)
+        delegate?.inputBar(self, wantsFrame: proposedFrame, panKind: .expandedResize)
+        if updateResizeToCollapsedMoveTransition(currentTranslation: translation) {
+            proposeCollapsedMoveFrameChange(delta: inputBarPanDelta(from: translation))
+        }
+    }
+
+    private func proposeCollapsedMoveFrameChange(delta: CGPoint) {
+        let proposedFrame = inputBarPanAnchorFrame.offsetBy(dx: delta.x, dy: delta.y)
+        delegate?.inputBar(self, wantsFrame: proposedFrame, panKind: .collapsedMove)
+        updateCollapsedHoldTracking(center: frame.center)
+    }
+
+    private func finishFramePanIfNeeded(velocity: CGPoint) {
+        switch inputBarPanMode {
+        case .expandedMenuResize:
+            delegate?.inputBar(
+                self,
+                didEndFramePan: OpenAPPInputBarFramePanEndContext(
+                    kind: .expandedResize,
+                    velocity: velocity,
+                    frame: frame,
+                    didHoldNearFinalPosition: false
+                )
+            )
+        case .collapsedMenuMove:
+            delegate?.inputBar(self, didEndFramePan: collapsedMoveEndContext(velocity: velocity))
+        case .undecided, .textInputFocus, .ignored:
+            break
+        }
+    }
+
+    private func collapsedMoveEndContext(velocity: CGPoint) -> OpenAPPInputBarFramePanEndContext {
+        let speed = hypot(velocity.x, velocity.y)
+        let now = Date.timeIntervalSinceReferenceDate
+        let holdDuration = now - (collapsedHoldStartTime ?? now)
+        let didHoldNearFinalPosition = holdDuration >= Self.collapsedHoldDuration
+            && speed <= Self.collapsedHoldSlowVelocityThreshold
+        return OpenAPPInputBarFramePanEndContext(
+            kind: .collapsedMove,
+            velocity: velocity,
+            frame: frame,
+            didHoldNearFinalPosition: didHoldNearFinalPosition
+        )
+    }
+
+    private func lockedInputBarPanDirection(for delta: CGPoint) -> InputBarPanDirection? {
+        let ax = abs(delta.x)
+        let ay = abs(delta.y)
+        guard max(ax, ay) >= Self.panDirectionThreshold else { return nil }
+        return ax > ay ? .horizontal : .vertical
+    }
+
+    private func resolveInputBarPanModeIfNeeded(delta: CGPoint) {
+        guard inputBarPanMode == .undecided else { return }
+
+        if inputBarPanStartRegion == .menuButton, inputBarPanStartedCollapsed {
+            inputBarPanMode = .collapsedMenuMove
+            return
+        }
+
+        guard let direction = lockedInputBarPanDirection(for: delta) else { return }
+
+        switch inputBarPanStartRegion {
+        case .menuButton:
+            if direction == .horizontal {
+                inputBarPanMode = .expandedMenuResize
+            } else if delta.y > 0, textField.isFirstResponder {
+                inputBarPanMode = .textInputFocus
+            } else {
+                inputBarPanMode = .ignored
+            }
+        case .inputArea:
+            guard inputSource == .keyboard else {
+                inputBarPanMode = .ignored
+                return
+            }
+
+            guard direction == .vertical else {
+                inputBarPanMode = .ignored
+                return
+            }
+
+            if delta.y > 0, textField.isFirstResponder {
+                inputBarPanMode = .textInputFocus
+            } else if delta.y < 0, !textField.isFirstResponder {
+                inputBarPanMode = .textInputFocus
+            } else {
+                inputBarPanMode = .ignored
+            }
+        case .bar:
+            if direction == .vertical, delta.y > 0, textField.isFirstResponder {
+                inputBarPanMode = .textInputFocus
+            } else {
+                inputBarPanMode = .ignored
+            }
+        }
+    }
+
+    private func updateResizeToCollapsedMoveTransition(currentTranslation: CGPoint) -> Bool {
+        guard inputBarPanMode == .expandedMenuResize else {
+            resetResizeCollapsedHoldTracking()
+            return false
+        }
+
+        guard isCollapsed else {
+            resetResizeCollapsedHoldTracking()
+            return false
+        }
+
+        if resizeCollapsedHoldStartTime == nil {
+            resizeCollapsedHoldStartTime = Date.timeIntervalSinceReferenceDate
+            return false
+        }
+
+        let now = Date.timeIntervalSinceReferenceDate
+        let holdDuration = now - (resizeCollapsedHoldStartTime ?? now)
+        if holdDuration >= Self.resizeToCollapsedMoveHoldDuration {
+            switchExpandedResizeToCollapsedMove(currentTranslation: currentTranslation)
+            return true
+        }
+
+        return false
+    }
+
+    private func resetResizeCollapsedHoldTracking() {
+        resizeCollapsedHoldStartTime = nil
+    }
+
+    private func switchExpandedResizeToCollapsedMove(currentTranslation: CGPoint) {
+        inputBarPanMode = .collapsedMenuMove
+        inputBarPanStartedCollapsed = true
+        inputBarPanAnchorFrame = frame
+        inputBarPanAnchorTranslation = currentTranslation
+        resetCollapsedHoldTracking(center: frame.center)
+        resetResizeCollapsedHoldTracking()
+    }
+
+    private func inputBarPanDelta(from translation: CGPoint) -> CGPoint {
+        CGPoint(
+            x: translation.x - inputBarPanAnchorTranslation.x,
+            y: translation.y - inputBarPanAnchorTranslation.y
+        )
+    }
+
+    private func expandedResizeFrame(deltaX: CGFloat) -> CGRect {
+        let rightEdge = inputBarPanAnchorFrame.maxX
+        let width = max(Self.collapsedMinWidth, inputBarPanAnchorFrame.width - deltaX)
+        return CGRect(
+            x: rightEdge - width,
+            y: inputBarPanAnchorFrame.minY,
+            width: width,
+            height: inputBarPanAnchorFrame.height
+        )
+    }
+
+    private func resetCollapsedHoldTracking(center: CGPoint) {
+        collapsedHoldAnchorCenter = center
+        collapsedHoldStartTime = Date.timeIntervalSinceReferenceDate
+    }
+
+    private func updateCollapsedHoldTracking(center: CGPoint) {
+        if center.distance(to: collapsedHoldAnchorCenter) > Self.collapsedHoldPositionThreshold {
+            resetCollapsedHoldTracking(center: center)
+        }
+    }
+
+    private func resetInputBarPanState() {
+        inputBarPanStartRegion = .bar
+        inputBarPanMode = .undecided
+        inputBarPanStartedCollapsed = false
+        inputBarPanAnchorFrame = .zero
+        inputBarPanAnchorTranslation = .zero
+        collapsedHoldStartTime = nil
+        resetResizeCollapsedHoldTracking()
+    }
+
+    private static func clamp(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat {
+        min(hi, max(lo, v))
+    }
+
+    private static func isFrame(_ lhs: CGRect, effectivelyEqualTo rhs: CGRect) -> Bool {
+        abs(lhs.minX - rhs.minX) <= 0.5
+            && abs(lhs.minY - rhs.minY) <= 0.5
+            && abs(lhs.width - rhs.width) <= 0.5
+            && abs(lhs.height - rhs.height) <= 0.5
+    }
+
+    private static func isSize(_ lhs: CGSize, effectivelyEqualTo rhs: CGSize) -> Bool {
+        abs(lhs.width - rhs.width) <= 0.5
+            && abs(lhs.height - rhs.height) <= 0.5
     }
 }
 
 // MARK: - UITextFieldDelegate
 
+/// 处理 textField 的输入状态变化和键盘发送行为。
 extension OpenAPPInputBar: UITextFieldDelegate {
+    public func textFieldDidBeginEditing(_ textField: UITextField) {
+        updateTextFieldPlaceholder()
+        delegate?.inputBar(self, didChangeTextInputFocus: true)
+    }
+
+    public func textFieldDidEndEditing(_ textField: UITextField) {
+        updateTextFieldPlaceholder()
+        delegate?.inputBar(self, didChangeTextInputFocus: false)
+    }
+
     public func textFieldShouldReturn(_ textField: UITextField) -> Bool {
         guard let text = textField.text?.trimmingCharacters(in: .whitespacesAndNewlines),
               !text.isEmpty else { return true }
@@ -416,25 +978,71 @@ extension OpenAPPInputBar: UITextFieldDelegate {
 
 // MARK: - UIGestureRecognizerDelegate
 
+/// 处理 inputBar 内部 pan、长按语音输入等手势是否允许开始，以及手势起点区域判定。
 extension OpenAPPInputBar: UIGestureRecognizerDelegate {
-    public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        if gestureRecognizer === keyboardDismissPan {
-            return textField.isFirstResponder
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === inputBarPan {
+            guard menuButton.isEnabled else {
+                inputBarPanStartRegion = .bar
+                return false
+            }
+
+            inputBarPanStartRegion = startRegion(for: touch.location(in: self))
+            return true
         }
         return true
+    }
+
+    public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === voiceInputPress {
+            return canBeginVoiceInput(source: .voiceInputArea)
+        }
+
+        if gestureRecognizer === textInputVoiceLongPress {
+            return canBeginVoiceInput(source: .textInputLongPress)
+        }
+
+        if gestureRecognizer === inputBarPan {
+            guard menuButton.isEnabled, !isHoldingVoiceInput else { return false }
+
+            let velocity = inputBarPan.velocity(in: self)
+            let ax = abs(velocity.x)
+            let ay = abs(velocity.y)
+            let isVertical = ay >= ax
+
+            switch inputBarPanStartRegion {
+            case .bar:
+                return isVertical && velocity.y > 0 && textField.isFirstResponder
+            case .inputArea:
+                guard inputSource == .keyboard else { return false }
+                if !isVertical { return false }
+                if velocity.y > 0, textField.isFirstResponder { return true }
+                if velocity.y < 0, !textField.isFirstResponder { return true }
+                return false
+            case .menuButton:
+                return true
+            }
+        }
+        return true
+    }
+
+    private func startRegion(for point: CGPoint) -> InputBarPanStartRegion {
+        if menuButton.frame.contains(point) {
+            return .menuButton
+        }
+
+        if inputAreaContainer.frame.contains(point) {
+            return .inputArea
+        }
+
+        return .bar
     }
 
     public func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        if gestureRecognizer === keyboardDismissPan || otherGestureRecognizer === keyboardDismissPan {
-            if otherGestureRecognizer is UIPanGestureRecognizer || gestureRecognizer is UIPanGestureRecognizer {
-                return true
-            }
-            return false
-        }
-        return true
+        false
     }
 
     public func gestureRecognizer(
@@ -442,6 +1050,20 @@ extension OpenAPPInputBar: UIGestureRecognizerDelegate {
         shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
         false
+    }
+}
+
+/// CGRect 便捷能力：提供中心点，减少 frame 拖拽计算中的重复 CGPoint 构造。
+private extension CGRect {
+    var center: CGPoint {
+        CGPoint(x: midX, y: midY)
+    }
+}
+
+/// CGPoint 便捷能力：提供两点距离计算，用于判断收起态拖拽是否停留在同一落点附近。
+private extension CGPoint {
+    func distance(to other: CGPoint) -> CGFloat {
+        hypot(x - other.x, y - other.y)
     }
 }
 
