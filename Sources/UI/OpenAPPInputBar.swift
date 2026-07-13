@@ -26,6 +26,23 @@ public enum OpenAPPInputBarVoiceInputSource {
     case textInputLongPress
 }
 
+/// 语音输入手势的值上下文：不向宿主暴露 UIKit recognizer，只透传阶段与宿主坐标系中的位置。
+public struct OpenAPPInputBarVoiceGestureEvent {
+    /// 手势阶段：began → moved* → ended / cancelled。
+    public enum Phase {
+        case began
+        case moved
+        case ended
+        case cancelled
+    }
+
+    public let source: OpenAPPInputBarVoiceInputSource
+    public let phase: Phase
+
+    /// 手指在 inputBar 宿主视图（superview）坐标系中的位置。
+    public let locationInHost: CGPoint
+}
+
 /// inputBar frame 拖拽结束时传给外部的上下文，外部据此决定最终展开、收起、吸附或自由落位。
 public struct OpenAPPInputBarFramePanEndContext {
     public let kind: OpenAPPInputBarFramePanKind
@@ -55,12 +72,7 @@ public protocol OpenAPPInputBarDelegate: AnyObject {
     func inputBarDidTapPlus(_ bar: OpenAPPInputBar)
     func inputBar(_ bar: OpenAPPInputBar, didChangeInputSource source: OpenAPPInputBarInputSource)
     func inputBar(_ bar: OpenAPPInputBar, didChangeTextInputFocus isFocused: Bool)
-    func inputBar(
-        _ bar: OpenAPPInputBar,
-        didReceiveVoiceInputGesture gestureRecognizer: UILongPressGestureRecognizer,
-        source: OpenAPPInputBarVoiceInputSource,
-        state: UIGestureRecognizer.State
-    )
+    func inputBar(_ bar: OpenAPPInputBar, didReceiveVoiceInputGesture event: OpenAPPInputBarVoiceGestureEvent)
     func inputBarDidRequestExpand(_ bar: OpenAPPInputBar)
     func inputBarDidRequestCollapse(_ bar: OpenAPPInputBar)
     func inputBar(
@@ -81,12 +93,7 @@ public extension OpenAPPInputBarDelegate {
     func inputBarDidTapPlus(_ bar: OpenAPPInputBar) {}
     func inputBar(_ bar: OpenAPPInputBar, didChangeInputSource source: OpenAPPInputBarInputSource) {}
     func inputBar(_ bar: OpenAPPInputBar, didChangeTextInputFocus isFocused: Bool) {}
-    func inputBar(
-        _ bar: OpenAPPInputBar,
-        didReceiveVoiceInputGesture gestureRecognizer: UILongPressGestureRecognizer,
-        source: OpenAPPInputBarVoiceInputSource,
-        state: UIGestureRecognizer.State
-    ) {}
+    func inputBar(_ bar: OpenAPPInputBar, didReceiveVoiceInputGesture event: OpenAPPInputBarVoiceGestureEvent) {}
     func inputBarDidRequestExpand(_ bar: OpenAPPInputBar) {}
     func inputBarDidRequestCollapse(_ bar: OpenAPPInputBar) {}
     func inputBar(
@@ -175,7 +182,7 @@ public final class OpenAPPInputBar: UIView {
     private var resizeCollapsedHoldStartTime: TimeInterval?
     private var isHoldingVoiceInput = false
     private var activeVoiceInputSource: OpenAPPInputBarVoiceInputSource?
-    private weak var activeVoiceInputGestureRecognizer: UILongPressGestureRecognizer?
+    private var lastVoiceInputHostLocation: CGPoint = .zero
 
     // MARK: - Delegate
 
@@ -244,9 +251,9 @@ public final class OpenAPPInputBar: UIView {
     }
 
     public func setInputBarFrame(_ frame: CGRect, animated: Bool) {
-        guard !Self.isFrame(self.frame, effectivelyEqualTo: frame) else { return }
+        guard !self.frame.isApproximatelyEqual(to: frame) else { return }
 
-        let sizeWillChange = !Self.isSize(bounds.size, effectivelyEqualTo: frame.size)
+        let sizeWillChange = !bounds.size.isApproximatelyEqual(to: frame.size)
         let apply = {
             self.frame = frame
             if sizeWillChange {
@@ -437,13 +444,13 @@ public final class OpenAPPInputBar: UIView {
         menuButton.frame = CGRect(x: menuX, y: buttonY, width: Self.buttonSize, height: Self.buttonSize)
 
         inputAreaContainer.alpha = inputAreaWidth > 0.5 ? 1 : 0
-        inputSourceButton.alpha = Self.clamp(
+        inputSourceButton.alpha = OpenAPPGeometry.clamp(
             (width - Self.collapsedPlusVisibleWidth)
                 / (Self.compressedTextGapWidth - Self.collapsedPlusVisibleWidth),
             0,
             1
         )
-        plusButton.alpha = Self.clamp(
+        plusButton.alpha = OpenAPPGeometry.clamp(
             (width - Self.collapsedMinWidth)
                 / (Self.collapsedPlusVisibleWidth - Self.collapsedMinWidth),
             0,
@@ -454,7 +461,7 @@ public final class OpenAPPInputBar: UIView {
     private func updateCapsuleCornerRadius(for size: CGSize) {
         let width = max(size.width, Self.collapsedMinWidth)
         let expandedTravel = Self.minimumExpandedWidth - Self.collapsedMinWidth
-        let expandedProgress = Self.clamp((width - Self.collapsedMinWidth) / expandedTravel, 0, 1)
+        let expandedProgress = OpenAPPGeometry.clamp((width - Self.collapsedMinWidth) / expandedTravel, 0, 1)
         let cornerRadiusCollapseRatio = 1 - expandedProgress
         let collapsedRadius = min(width, size.height) / 2
         let radius = Self.expandedCornerRadius
@@ -492,7 +499,7 @@ public final class OpenAPPInputBar: UIView {
         }
 
         if inputSource == .voice {
-            finishActiveVoiceInput(state: .cancelled, gestureRecognizer: nil)
+            finishActiveVoiceInput(gestureRecognizer: nil)
         }
 
         inputSource = source
@@ -590,11 +597,12 @@ public final class OpenAPPInputBar: UIView {
             beginVoiceInput(source: source, gestureRecognizer: gr)
         case .changed:
             guard isHoldingVoiceInput, activeVoiceInputSource == source else { return }
-            delegate?.inputBar(self, didReceiveVoiceInputGesture: gr, source: source, state: gr.state)
+            lastVoiceInputHostLocation = hostLocation(of: gr)
+            sendVoiceGestureEvent(source: source, phase: .moved)
         case .ended:
-            finishActiveVoiceInput(state: gr.state, gestureRecognizer: gr)
+            finishActiveVoiceInput(gestureRecognizer: gr)
         case .cancelled, .failed:
-            finishActiveVoiceInput(state: gr.state, gestureRecognizer: gr)
+            finishActiveVoiceInput(gestureRecognizer: gr, forcesCancel: true)
         default:
             break
         }
@@ -612,39 +620,46 @@ public final class OpenAPPInputBar: UIView {
 
         isHoldingVoiceInput = true
         activeVoiceInputSource = source
-        activeVoiceInputGestureRecognizer = gestureRecognizer
+        lastVoiceInputHostLocation = hostLocation(of: gestureRecognizer)
         setVoiceInputHolding(source == .voiceInputArea)
 
-        delegate?.inputBar(
-            self,
-            didReceiveVoiceInputGesture: gestureRecognizer,
-            source: source,
-            state: gestureRecognizer.state
-        )
+        sendVoiceGestureEvent(source: source, phase: .began)
     }
 
+    /// 结束当前语音输入手势。`gestureRecognizer` 为 nil 表示内部主动打断（如切换输入源），一律按取消上报。
     private func finishActiveVoiceInput(
-        state: UIGestureRecognizer.State,
-        gestureRecognizer: UILongPressGestureRecognizer?
+        gestureRecognizer: UILongPressGestureRecognizer?,
+        forcesCancel: Bool = false
     ) {
         guard isHoldingVoiceInput,
               let source = activeVoiceInputSource else { return }
 
-        let gestureToSend = gestureRecognizer ?? activeVoiceInputGestureRecognizer
-        let delegateState: UIGestureRecognizer.State = gestureRecognizer == nil ? .cancelled : state
+        if let gestureRecognizer = gestureRecognizer {
+            lastVoiceInputHostLocation = hostLocation(of: gestureRecognizer)
+        }
+        let phase: OpenAPPInputBarVoiceGestureEvent.Phase =
+            (gestureRecognizer == nil || forcesCancel) ? .cancelled : .ended
         isHoldingVoiceInput = false
         activeVoiceInputSource = nil
-        activeVoiceInputGestureRecognizer = nil
         setVoiceInputHolding(false)
 
-        if let gestureToSend {
-            delegate?.inputBar(
-                self,
-                didReceiveVoiceInputGesture: gestureToSend,
-                source: source,
-                state: delegateState
-            )
-        }
+        sendVoiceGestureEvent(source: source, phase: phase)
+    }
+
+    private func sendVoiceGestureEvent(
+        source: OpenAPPInputBarVoiceInputSource,
+        phase: OpenAPPInputBarVoiceGestureEvent.Phase
+    ) {
+        delegate?.inputBar(self, didReceiveVoiceInputGesture: OpenAPPInputBarVoiceGestureEvent(
+            source: source,
+            phase: phase,
+            locationInHost: lastVoiceInputHostLocation
+        ))
+    }
+
+    /// 手指在宿主视图坐标系中的位置；尚未挂载时退化为自身坐标。
+    private func hostLocation(of gestureRecognizer: UIGestureRecognizer) -> CGPoint {
+        gestureRecognizer.location(in: superview ?? self)
     }
 
     private func canBeginVoiceInput(source: OpenAPPInputBarVoiceInputSource) -> Bool {
@@ -937,21 +952,6 @@ public final class OpenAPPInputBar: UIView {
         resetResizeCollapsedHoldTracking()
     }
 
-    private static func clamp(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat {
-        min(hi, max(lo, v))
-    }
-
-    private static func isFrame(_ lhs: CGRect, effectivelyEqualTo rhs: CGRect) -> Bool {
-        abs(lhs.minX - rhs.minX) <= 0.5
-            && abs(lhs.minY - rhs.minY) <= 0.5
-            && abs(lhs.width - rhs.width) <= 0.5
-            && abs(lhs.height - rhs.height) <= 0.5
-    }
-
-    private static func isSize(_ lhs: CGSize, effectivelyEqualTo rhs: CGSize) -> Bool {
-        abs(lhs.width - rhs.width) <= 0.5
-            && abs(lhs.height - rhs.height) <= 0.5
-    }
 }
 
 // MARK: - UITextFieldDelegate
@@ -1050,20 +1050,6 @@ extension OpenAPPInputBar: UIGestureRecognizerDelegate {
         shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
         false
-    }
-}
-
-/// CGRect 便捷能力：提供中心点，减少 frame 拖拽计算中的重复 CGPoint 构造。
-private extension CGRect {
-    var center: CGPoint {
-        CGPoint(x: midX, y: midY)
-    }
-}
-
-/// CGPoint 便捷能力：提供两点距离计算，用于判断收起态拖拽是否停留在同一落点附近。
-private extension CGPoint {
-    func distance(to other: CGPoint) -> CGFloat {
-        hypot(x - other.x, y - other.y)
     }
 }
 

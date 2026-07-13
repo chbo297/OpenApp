@@ -55,21 +55,74 @@ public enum OpenAPPVoiceRecognitionStopResult: Sendable {
     case stopped(finalText: String, reason: OpenAPPVoiceRecognitionEndReason)
 }
 
+/// 语音识别服务抽象：协调层依赖此协议，便于替身测试与替换实现。
+/// 事件必须在主线程投递；识别热路径的实现细节（队列、权限、音频会话）由实现方自理。
+protocol OpenAPPVoiceRecognitionProviding: AnyObject {
+    /// 识别语言优先级列表，按顺序取第一个系统可用的识别器。
+    var preferredLocales: [Locale] { get set }
+
+    /// 开始录音识别；locale 传 nil 时按 preferredLocales 解析。
+    func startRecording(locale: Locale?) -> AsyncStream<OpenAPPVoiceRecognitionEvent>
+
+    /// 请求停止（异步清理，结束事件经事件流投递）。
+    func requestStopRecording(reason: OpenAPPVoiceRecognitionEndReason)
+}
+
+extension OpenAPPVoiceRecognitionProviding {
+    func startRecording() -> AsyncStream<OpenAPPVoiceRecognitionEvent> {
+        startRecording(locale: nil)
+    }
+}
+
 // Mutable recognition state is isolated to `audioQueue`.
-public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable {
+public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable, OpenAPPVoiceRecognitionProviding {
     public static let shared = OpenAPPVoiceRecognitionManager()
 
     /// Enables direct console logs for voice-recognition state changes. 默认关闭，调试音频层时再手动打开。
     public var isConsoleLoggingEnabled: Bool {
         get {
-            loggingLock.lock()
-            defer { loggingLock.unlock() }
+            configLock.lock()
+            defer { configLock.unlock() }
             return _isConsoleLoggingEnabled
         }
         set {
-            loggingLock.lock()
+            configLock.lock()
             _isConsoleLoggingEnabled = newValue
-            loggingLock.unlock()
+            configLock.unlock()
+        }
+    }
+
+    /// 临时调试开关：开启后完全绕过真实音频/语音系统接口，只发出假的 loading/recording/ended 事件。
+    ///
+    /// 用于排查 `AVAudioSession` / `AVAudioEngine` / `SFSpeechRecognizer` 是否影响 UI 震动或手势反馈。
+    /// 调试结束后应改回 `false`，否则不会真正录音和识别。
+    public var isAudioSystemBypassForDebugEnabled: Bool {
+        get {
+            configLock.lock()
+            defer { configLock.unlock() }
+            return _isAudioSystemBypassForDebugEnabled
+        }
+        set {
+            configLock.lock()
+            _isAudioSystemBypassForDebugEnabled = newValue
+            configLock.unlock()
+        }
+    }
+
+    /// 识别语言优先级列表：按顺序取第一个系统可用的识别器。
+    ///
+    /// 默认中文优先，其次系统当前语言。`SFSpeechRecognizer` 单次只能绑定一种语言，
+    /// 这里的"多语言"指宿主可配置候选语言并按优先级回退（中文识别器本身也能容忍中英混说）。
+    public var preferredLocales: [Locale] {
+        get {
+            configLock.lock()
+            defer { configLock.unlock() }
+            return _preferredLocales
+        }
+        set {
+            configLock.lock()
+            _preferredLocales = newValue
+            configLock.unlock()
         }
     }
 
@@ -77,8 +130,11 @@ public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable
         label: "com.openapp.voiceRecognition.audio",
         qos: .userInitiated
     )
-    private let loggingLock = NSLock()
+    /// 配置项统一用这一把锁保护（日志/调试开关、语言列表）；识别热路径状态仍隔离在 audioQueue。
+    private let configLock = NSLock()
     private var _isConsoleLoggingEnabled = false
+    private var _isAudioSystemBypassForDebugEnabled = false
+    private var _preferredLocales: [Locale] = [Locale(identifier: "zh-CN"), .current]
 
     private enum InternalState {
         case idle
@@ -104,10 +160,12 @@ public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable
     private var recognizer: SFSpeechRecognizer?
     private var finalText = ""
     private var partialText = ""
+    private var activeSessionUsesDebugAudioBypass = false
 
-    public func startRecording(locale: Locale = .current) -> AsyncStream<OpenAPPVoiceRecognitionEvent> {
+    /// 开始录音识别。`locale` 传 nil 时按 `preferredLocales` 优先级自动解析识别语言。
+    public func startRecording(locale: Locale? = nil) -> AsyncStream<OpenAPPVoiceRecognitionEvent> {
         let sessionID = UUID()
-        log("startRecording requested locale=\(locale.identifier) session=\(shortSessionID(sessionID))")
+        log("startRecording requested locale=\(locale?.identifier ?? "auto") session=\(shortSessionID(sessionID))")
 
         return AsyncStream { continuation in
             continuation.onTermination = { [weak self] _ in
@@ -133,8 +191,13 @@ public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable
                 self.setState(.starting(sessionID), reason: "start recording")
                 self.finalText = ""
                 self.partialText = ""
-                self.emitLoading(.requestingSpeechPermission, sessionID: sessionID)
-                self.requestSpeechPermission(sessionID: sessionID, locale: locale)
+                if self.isAudioSystemBypassForDebugEnabled {
+                    self.startDebugFakeRecording(sessionID: sessionID)
+                } else {
+                    self.activeSessionUsesDebugAudioBypass = false
+                    self.emitLoading(.requestingSpeechPermission, sessionID: sessionID)
+                    self.requestSpeechPermission(sessionID: sessionID, locale: locale)
+                }
             }
         }
     }
@@ -175,7 +238,20 @@ public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable
         continuation?.resume(returning: .stopped(finalText: text, reason: reason))
     }
 
-    private func requestSpeechPermission(sessionID: UUID, locale: Locale) {
+    private func startDebugFakeRecording(sessionID: UUID) {
+        guard state.sessionID == sessionID else {
+            log("debug fake recording ignored for stale session=\(shortSessionID(sessionID)) current=\(shortSessionID(state.sessionID))")
+            return
+        }
+
+        activeSessionUsesDebugAudioBypass = true
+        log("debug fake recording enabled: bypass audio and speech system APIs session=\(shortSessionID(sessionID))")
+        emitLoading(.waitingForRecognizer, sessionID: sessionID)
+        setState(.recording(sessionID), reason: "debug fake recording started")
+        emitRecording(sessionID: sessionID)
+    }
+
+    private func requestSpeechPermission(sessionID: UUID, locale: Locale?) {
         let status = SFSpeechRecognizer.authorizationStatus()
         log("speech permission status=\(describe(status)) session=\(shortSessionID(sessionID))")
         switch status {
@@ -200,7 +276,7 @@ public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable
         }
     }
 
-    private func requestMicrophonePermission(sessionID: UUID, locale: Locale) {
+    private func requestMicrophonePermission(sessionID: UUID, locale: Locale?) {
         emitLoading(.requestingMicrophonePermission, sessionID: sessionID)
         let audioSession = AVAudioSession.sharedInstance()
 
@@ -228,16 +304,16 @@ public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable
         }
     }
 
-    private func startAudioSession(sessionID: UUID, locale: Locale) {
+    private func startAudioSession(sessionID: UUID, locale: Locale?) {
         guard state.sessionID == sessionID else {
             log("startAudioSession ignored for stale session=\(shortSessionID(sessionID)) current=\(shortSessionID(state.sessionID))")
             return
         }
         emitLoading(.preparingAudioSession, sessionID: sessionID)
 
-        let speechRecognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer()
+        let speechRecognizer = resolveSpeechRecognizer(explicitLocale: locale)
         guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else {
-            log("speech recognizer unavailable locale=\(locale.identifier) session=\(shortSessionID(sessionID))")
+            log("speech recognizer unavailable locale=\(locale?.identifier ?? "auto") session=\(shortSessionID(sessionID))")
             finishSessionIfCurrent(sessionID, reason: .recognizerUnavailable)
             return
         }
@@ -246,6 +322,12 @@ public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.record, mode: .measurement, options: [.duckOthers])
+            do {
+                try audioSession.setAllowHapticsAndSystemSoundsDuringRecording(true)
+                log("audio session allows haptics and system sounds during recording session=\(shortSessionID(sessionID))")
+            } catch {
+                log("allow haptics during recording failed error=\(error.localizedDescription) session=\(shortSessionID(sessionID))")
+            }
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
             log("audio session active session=\(shortSessionID(sessionID))")
         } catch {
@@ -292,6 +374,25 @@ public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable
             log("audio engine start failed error=\(error.localizedDescription) session=\(shortSessionID(sessionID))")
             finishSessionIfCurrent(sessionID, reason: .failed(error.localizedDescription))
         }
+    }
+
+    /// 解析识别器：显式 locale 最优先，其次按 preferredLocales 顺序取第一个可用识别器，最后回退系统默认。
+    private func resolveSpeechRecognizer(explicitLocale: Locale?) -> SFSpeechRecognizer? {
+        var candidates: [Locale] = []
+        if let explicitLocale = explicitLocale {
+            candidates.append(explicitLocale)
+        }
+        candidates.append(contentsOf: preferredLocales)
+
+        for candidate in candidates {
+            if let recognizer = SFSpeechRecognizer(locale: candidate), recognizer.isAvailable {
+                log("speech recognizer resolved locale=\(candidate.identifier)")
+                return recognizer
+            }
+            log("speech recognizer candidate unavailable locale=\(candidate.identifier)")
+        }
+        log("speech recognizer falling back to system default locale")
+        return SFSpeechRecognizer()
     }
 
     private func handleRecognitionCallback(
@@ -368,6 +469,16 @@ public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable
 
     private func cleanupAudioResources() {
         log("cleanup audio resources state=\(describe(state))")
+        if activeSessionUsesDebugAudioBypass {
+            log("debug fake recording cleanup: skip audio system APIs")
+            activeSessionUsesDebugAudioBypass = false
+            recognitionTask = nil
+            recognitionRequest = nil
+            audioEngine = nil
+            recognizer = nil
+            return
+        }
+
         NotificationCenter.default.removeObserver(self, name: AVAudioSession.interruptionNotification, object: nil)
 
         if let engine = audioEngine {
@@ -384,6 +495,7 @@ public final class OpenAPPVoiceRecognitionManager: NSObject, @unchecked Sendable
         recognizer = nil
 
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        activeSessionUsesDebugAudioBypass = false
     }
 
     private func emitLoading(_ reason: OpenAPPVoiceRecognitionLoadingReason, sessionID: UUID) {

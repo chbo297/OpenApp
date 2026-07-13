@@ -10,22 +10,16 @@ import UIKit
 
 extension OpenAPPViewController {
     func setupKeyboardObservers() {
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(keyboardWillChangeFrame(_:)),
-            name: UIResponder.keyboardWillChangeFrameNotification, object: nil
-        )
+        let observer = OpenAPPKeyboardObserver(referenceView: view)
+        observer.onChange = { [weak self] height, duration in
+            self?.handleKeyboardHeightChange(height: height, duration: duration)
+        }
+        keyboardObserver = observer
     }
 
-    @objc func keyboardWillChangeFrame(_ notification: Notification) {
-        guard let endFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect,
-              let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? TimeInterval
-        else { return }
-
-        let kbInView = view.convert(endFrame, from: nil)
-        let newKeyboardH = max(0, view.bounds.intersection(kbInView).height)
-
+    func handleKeyboardHeightChange(height: CGFloat, duration: TimeInterval) {
         let oldEffectiveKeyboardHeight = effectiveKeyboardHeight
-        observedKeyboardHeight = newKeyboardH
+        observedKeyboardHeight = height
         let newEffectiveKeyboardHeight = effectiveKeyboardHeight
 
         guard abs(oldEffectiveKeyboardHeight - newEffectiveKeyboardHeight) > 0.5 else {

@@ -107,32 +107,15 @@ open class OpenAPPViewController: UIViewController {
     var storedCollapsedInputBarPlacement: CGPoint?
     var expandedResizeStableWidth: CGFloat?
     var expandedResizeStableStartTime: TimeInterval?
-    var activeVoiceInput: ActiveVoiceInput?
-    var voiceRecognitionTask: Task<Void, Never>?
-    let voiceRecognitionManager = OpenAPPVoiceRecognitionManager.shared
-    lazy var voiceRecognitionHapticGenerator = makeVoiceRecognitionHapticGenerator()
+    var keyboardObserver: OpenAPPKeyboardObserver?
 
-    struct ActiveVoiceInput {
-        /// 手指状态：当前手指在 OpenAPPViewController 坐标系中的位置。
-        var fingerLocation: CGPoint
+    /// inputBar 布局偏好的持久化存储；frame 策略本身在 OpenAPPInputBarFramePolicy。
+    let inputBarLayoutStore: OpenAPPInputBarLayoutStoring = OpenAPPUserDefaultsInputBarLayoutStore()
 
-        /// 识别状态：语音识别在 UI 上呈现为未开始、加载中或录音中。
-        var recognitionState: OpenAPPVoiceRecognitionVisualState = .loading
-
-        /// 抬起行为：当前手指位置对应的松手后动作。
-        var releaseAction: OpenAPPVoiceInputReleaseAction = .send
-
-        /// 识别文本：语音识别管理器实时返回的文本内容。
-        var transcriptText = ""
-
-        var showsTranscriptCursor: Bool {
-            !transcriptText.isEmpty
-        }
-    }
-
-    var isVoiceInputActive: Bool {
-        activeVoiceInput != nil
-    }
+    /// 语音输入协调器：一次语音输入的唯一状态主人；OpenAPPViewController 只做接线。
+    lazy var voiceInputCoordinator = OpenAPPVoiceInputCoordinator(
+        feedback: OpenAPPVoiceInputHapticFeedback(generator: makeVoiceRecognitionHapticGenerator())
+    )
 
     var effectiveKeyboardHeight: CGFloat {
         shouldInputBarAvoidKeyboard ? observedKeyboardHeight : 0
@@ -142,38 +125,11 @@ open class OpenAPPViewController: UIViewController {
         inputBar.inputSource == .keyboard && inputBar.textField.isFirstResponder
     }
 
-    /// 宽屏判定阈值：OpenAPPViewController 宽度大于该值时，按宽屏 inputBar 策略处理。
-    static let inputBarWideLayoutWidth: CGFloat = 440
-
-    /// 宽屏默认展开宽度上限：用户未手动调整宽度前，展开态 inputBar 默认最大不超过该值。
-    static let inputBarWideDefaultMaxWidth: CGFloat = 600
-
-    /// inputBar 与容器左右安全区域之间的水平间距，由 OpenAPPViewController 外部布局统一控制。
-    static let inputBarHorizontalInset: CGFloat = 12
-
-    /// inputBar 避让键盘时与键盘顶部保留的间距，当前为 0 表示紧贴键盘。
-    static let inputBarKeyboardSpacing: CGFloat = 0
-
-    /// 慢速手势阈值：速度绝对值不超过该值时，按“低速/近静止”策略判断最终状态。
-    static let inputBarSlowVelocityThreshold: CGFloat = 50
-
-    /// 快速手势阈值：速度绝对值达到该值时，直接按手势方向决定展开/收起或吸附方向。
-    static let inputBarFastVelocityThreshold: CGFloat = 650
-
-    /// 中速手势投影系数：用当前速度预估阻尼落点，再根据落点决定最终状态。
-    static let inputBarProjectionFactor: CGFloat = 0.18
-
     /// 宽屏展开 resize 的稳定停留时长：手指在某个宽度附近停留超过该时长后，可将该宽度记为用户偏好。
     static let expandedResizeHoldDuration: TimeInterval = 0
 
     /// 宽屏展开 resize 的宽度稳定阈值：宽度变化不超过该值时，认为仍停留在同一个目标宽度附近。
     static let expandedResizeWidthStabilityThreshold: CGFloat = 4
-
-    /// UserDefaults key：保存宽屏下用户手动调整后的展开态 inputBar 宽度。
-    static let expandedWidthDefaultsKey = "com.openapp.ui.inputBar.wideExpandedWidth"
-
-    /// UserDefaults key：保存收起态 inputBar 位置，格式为 x,y，支持正负偏移以适配安全区域和尺寸变化。
-    static let collapsedPlacementDefaultsKey = "com.openapp.ui.inputBar.collapsedPlacementXY"
 
     // MARK: - Lifecycle
 
@@ -194,7 +150,6 @@ open class OpenAPPViewController: UIViewController {
     deinit {
         NotificationCenter.default.removeObserver(self)
         currentSession?.uiState.onChange = nil
-        voiceRecognitionTask?.cancel()
     }
 
     // MARK: - Manual Frame Layout

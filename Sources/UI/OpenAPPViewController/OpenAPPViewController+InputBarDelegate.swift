@@ -89,17 +89,15 @@ extension OpenAPPViewController: OpenAPPInputBarDelegate {
         }
     }
 
-    // 场景：文字输入态长按输入区域，或语音输入态按住“按住说话”区域时触发；begin/change/end/cancel 都通过这个方法透传。
+    // 场景：文字输入态长按输入区域，或语音输入态按住“按住说话”区域时触发；began/moved/ended/cancelled 都通过这个方法透传。
     public func inputBar(
         _ bar: OpenAPPInputBar,
-        didReceiveVoiceInputGesture gestureRecognizer: UILongPressGestureRecognizer,
-        source: OpenAPPInputBarVoiceInputSource,
-        state: UIGestureRecognizer.State
+        didReceiveVoiceInputGesture event: OpenAPPInputBarVoiceGestureEvent
     ) {
         logInputBarDelegate(
-            "didReceiveVoiceInputGesture source=\(source) state=\(inputBarDelegateGestureStateName(state)) location=\(formatInputBarDelegatePoint(gestureRecognizer.location(in: view)))"
+            "didReceiveVoiceInputGesture source=\(event.source) phase=\(event.phase) location=\(formatInputBarDelegatePoint(event.locationInHost))"
         )
-        handleVoiceInputGesture(gestureRecognizer, source: source, state: state)
+        handleVoiceInputGesture(event)
     }
 
     // 场景：点击输入源切换按钮中的语音图标时触发，默认由 inputBar 内部完成键盘/语音模式切换。
@@ -133,24 +131,6 @@ extension OpenAPPViewController: OpenAPPInputBarDelegate {
         )
     }
 
-    func inputBarDelegateGestureStateName(_ state: UIGestureRecognizer.State) -> String {
-        switch state {
-        case .possible:
-            return "possible"
-        case .began:
-            return "began"
-        case .changed:
-            return "changed"
-        case .ended:
-            return "ended"
-        case .cancelled:
-            return "cancelled"
-        case .failed:
-            return "failed"
-        @unknown default:
-            return "unknown"
-        }
-    }
 }
 
 #endif
