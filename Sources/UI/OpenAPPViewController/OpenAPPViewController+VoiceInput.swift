@@ -94,7 +94,7 @@ extension OpenAPPViewController: OpenAPPVoiceInputCoordinatorDelegate {
     }
 
     func voiceInput(_ coordinator: OpenAPPVoiceInputCoordinator, didRequestSend text: String) {
-        sendMessage(text: text)
+        dispatchOutgoingMessage(text: text)
     }
 
     func voiceInputDidFinish(_ coordinator: OpenAPPVoiceInputCoordinator) {

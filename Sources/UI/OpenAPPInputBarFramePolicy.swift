@@ -35,6 +35,12 @@ enum OpenAPPInputBarFramePolicy {
     /// 中速手势投影系数：用当前速度预估阻尼落点，再根据落点决定最终状态。
     static let projectionFactor: CGFloat = 0.18
 
+    /// inputBar 越界拖拽的初始阻尼系数；展开 resize 与收起 move 共用同一套橡皮筋手感。
+    static let edgeRubberBandCoefficient: CGFloat = 0.55
+
+    /// inputBar 越界拖拽的视觉位移上限（渐近值），避免胶囊被大幅拖出屏幕。
+    static let edgeRubberBandLimit: CGFloat = 42
+
     // MARK: - Context
 
     /// 一次布局决策所需的全部环境值快照。
@@ -133,6 +139,111 @@ enum OpenAPPInputBarFramePolicy {
         return CGRect(x: x, y: y, width: width, height: OpenAPPInputBar.barHeight)
     }
 
+    /// 拖拽 resize 期间约束展开 frame。
+    ///
+    /// 允许自定义宽度时保留原策略：左侧触边后，右侧可以继续向右扩展。
+    /// 关闭自定义宽度时固定本次手势的右边缘，左侧越过正常展示位置后立即进入阻尼拉伸。
+    static func constrainedExpandedResizeFrame(
+        _ proposedFrame: CGRect,
+        allowsWidthCustomization: Bool,
+        context: Context
+    ) -> CGRect {
+        guard !allowsWidthCustomization else {
+            return constrainedExpandedFrame(proposedFrame, context: context)
+        }
+
+        return fixedRightEdgeExpandedResizeFrame(
+            proposedFrame,
+            rubberBandsPastMaximumWidth: true,
+            context: context
+        )
+    }
+
+    /// 展开 resize 的严格合法 frame；用于松手决策，结果不包含左侧越界拉伸。
+    static func strictlyConstrainedExpandedResizeFrame(
+        _ proposedFrame: CGRect,
+        allowsWidthCustomization: Bool,
+        context: Context
+    ) -> CGRect {
+        guard !allowsWidthCustomization else {
+            return constrainedExpandedFrame(proposedFrame, context: context)
+        }
+
+        return fixedRightEdgeExpandedResizeFrame(
+            proposedFrame,
+            rubberBandsPastMaximumWidth: false,
+            context: context
+        )
+    }
+
+    /// 将左侧已经显示橡皮筋效果的展开 frame 反算为阻尼前 frame，供回弹中途的新手势连续接管。
+    static func rawExpandedResizeFrame(from displayedFrame: CGRect, context: Context) -> CGRect {
+        let metrics = fixedRightEdgeExpandedResizeMetrics(
+            rightEdge: displayedFrame.maxX,
+            context: context
+        )
+        let displayedWidth = max(OpenAPPInputBar.collapsedMinWidth, displayedFrame.width)
+        let rawWidth = displayedWidth > metrics.maximumWidth
+            ? metrics.maximumWidth + rawRubberBandDistance(displayedWidth - metrics.maximumWidth)
+            : displayedWidth
+        return CGRect(
+            x: metrics.rightEdge - rawWidth,
+            y: metrics.y,
+            width: rawWidth,
+            height: OpenAPPInputBar.barHeight
+        )
+    }
+
+    /// 当前展开 resize frame 是否仍处在固定右边缘后的左侧橡皮筋区域。
+    static func isExpandedResizeOverdragged(_ frame: CGRect, context: Context) -> Bool {
+        let metrics = fixedRightEdgeExpandedResizeMetrics(rightEdge: frame.maxX, context: context)
+        return frame.width > metrics.maximumWidth + 0.5
+    }
+
+    /// 关闭宽度自定义时的固定右边缘布局：最小宽度硬约束，正常展示宽度之后可选择硬约束或橡皮筋。
+    private static func fixedRightEdgeExpandedResizeFrame(
+        _ proposedFrame: CGRect,
+        rubberBandsPastMaximumWidth: Bool,
+        context: Context
+    ) -> CGRect {
+        let metrics = fixedRightEdgeExpandedResizeMetrics(
+            rightEdge: proposedFrame.maxX,
+            context: context
+        )
+        let proposedWidth = max(OpenAPPInputBar.collapsedMinWidth, proposedFrame.width)
+        let width: CGFloat
+        if rubberBandsPastMaximumWidth, proposedWidth > metrics.maximumWidth {
+            width = metrics.maximumWidth + rubberBandDistance(proposedWidth - metrics.maximumWidth)
+        } else {
+            width = min(proposedWidth, metrics.maximumWidth)
+        }
+        return CGRect(
+            x: metrics.rightEdge - width,
+            y: metrics.y,
+            width: width,
+            height: OpenAPPInputBar.barHeight
+        )
+    }
+
+    /// 固定右边缘 resize 的共享几何量，避免正向映射、反向映射和结束检测各自重复计算。
+    private static func fixedRightEdgeExpandedResizeMetrics(
+        rightEdge proposedRightEdge: CGFloat,
+        context: Context
+    ) -> (rightEdge: CGFloat, maximumWidth: CGFloat, y: CGFloat) {
+        let available = availableFrame(in: context, avoidingKeyboard: true)
+        let minimumWidth = OpenAPPInputBar.collapsedMinWidth
+        let rightEdge = OpenAPPGeometry.clamp(
+            proposedRightEdge,
+            available.minX + minimumWidth,
+            max(available.minX + minimumWidth, available.maxX)
+        )
+        let widthToLeftBoundary = max(minimumWidth, rightEdge - available.minX)
+        let preferredWidth = max(minimumWidth, preferredExpandedWidth(context))
+        let maximumWidth = min(widthToLeftBoundary, preferredWidth)
+        let y = max(available.minY, available.maxY - OpenAPPInputBar.barHeight)
+        return (rightEdge, maximumWidth, y)
+    }
+
     /// 可持久化的展开宽度：仅宽屏且宽度有效时返回截断后的值，否则 nil。
     static func storableExpandedWidth(_ width: CGFloat, context: Context) -> CGFloat? {
         let availableWidth = availableFrame(in: context, avoidingKeyboard: true).width
@@ -223,6 +334,92 @@ enum OpenAPPInputBarFramePolicy {
             width: width,
             height: height
         )
+    }
+
+    /// 收起态拖拽中的展示 frame：合法范围内 1:1 跟手，越界部分按非线性阻尼压缩。
+    static func rubberBandedCollapsedMoveFrame(_ proposedFrame: CGRect, context: Context) -> CGRect {
+        let available = availableFrame(in: context, avoidingKeyboard: false)
+        let width = OpenAPPInputBar.collapsedMinWidth
+        let height = OpenAPPInputBar.barHeight
+        let minX = available.minX
+        let maxX = max(minX, available.maxX - width)
+        let minY = available.minY
+        let maxY = max(minY, available.maxY - height)
+        return CGRect(
+            x: rubberBandedOrigin(proposedFrame.minX, minimum: minX, maximum: maxX),
+            y: rubberBandedOrigin(proposedFrame.minY, minimum: minY, maximum: maxY),
+            width: width,
+            height: height
+        )
+    }
+
+    /// 将已经显示过橡皮筋效果的 frame 反算为阻尼前的逻辑 frame。
+    ///
+    /// 用于用户在回弹动画中途再次按住拖拽：新手势从当前视觉位置接管，但后续位移仍沿用同一条阻尼曲线，
+    /// 避免把视觉 frame 再套一遍橡皮筋公式而产生跳变。
+    static func rawCollapsedMoveFrame(from displayedFrame: CGRect, context: Context) -> CGRect {
+        let available = availableFrame(in: context, avoidingKeyboard: false)
+        let width = OpenAPPInputBar.collapsedMinWidth
+        let height = OpenAPPInputBar.barHeight
+        let minX = available.minX
+        let maxX = max(minX, available.maxX - width)
+        let minY = available.minY
+        let maxY = max(minY, available.maxY - height)
+        return CGRect(
+            x: rawOrigin(forRubberBanded: displayedFrame.minX, minimum: minX, maximum: maxX),
+            y: rawOrigin(forRubberBanded: displayedFrame.minY, minimum: minY, maximum: maxY),
+            width: width,
+            height: height
+        )
+    }
+
+    /// 将单轴 origin 映射到“范围内原值、范围外橡皮筋值”。
+    private static func rubberBandedOrigin(
+        _ value: CGFloat,
+        minimum: CGFloat,
+        maximum: CGFloat
+    ) -> CGFloat {
+        if value < minimum {
+            return minimum - rubberBandDistance(minimum - value)
+        }
+        if value > maximum {
+            return maximum + rubberBandDistance(value - maximum)
+        }
+        return value
+    }
+
+    /// 越界距离越大，新增视觉位移越小；结果渐近于 `edgeRubberBandLimit`。
+    private static func rubberBandDistance(_ distance: CGFloat) -> CGFloat {
+        guard distance > 0 else { return 0 }
+        let scaledDistance = distance * edgeRubberBandCoefficient
+        return edgeRubberBandLimit
+            * scaledDistance
+            / (edgeRubberBandLimit + scaledDistance)
+    }
+
+    /// `rubberBandDistance` 的反函数，把屏幕上的越界距离还原为手势对应的原始越界距离。
+    private static func rawOrigin(
+        forRubberBanded value: CGFloat,
+        minimum: CGFloat,
+        maximum: CGFloat
+    ) -> CGFloat {
+        if value < minimum {
+            return minimum - rawRubberBandDistance(minimum - value)
+        }
+        if value > maximum {
+            return maximum + rawRubberBandDistance(value - maximum)
+        }
+        return value
+    }
+
+    /// 反算橡皮筋距离。合法显示结果严格小于 limit；epsilon 仅防御浮点误差导致分母为零。
+    private static func rawRubberBandDistance(_ displayedDistance: CGFloat) -> CGFloat {
+        guard displayedDistance > 0 else { return 0 }
+        let epsilon: CGFloat = 0.001
+        let boundedDistance = min(displayedDistance, edgeRubberBandLimit - epsilon)
+        return boundedDistance
+            * edgeRubberBandLimit
+            / (edgeRubberBandCoefficient * (edgeRubberBandLimit - boundedDistance))
     }
 
     /// frame → 可持久化位置：取较近的一侧记偏移，负号（含 -0.0）表示相对右/下边。

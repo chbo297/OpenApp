@@ -13,11 +13,22 @@ let package = Package(
             targets: ["OpenAPP"]
         ),
     ],
-    dependencies: [],
+    dependencies: [
+        .package(
+            url: "https://github.com/chbo297/BODragScroll.git",
+            from: "1.0.1"
+        )
+    ],
     targets: [
         .target(
             name: "OpenAPP",
-            dependencies: [],
+            dependencies: [
+                .product(
+                    name: "BODragScroll",
+                    package: "BODragScroll",
+                    condition: .when(platforms: [.iOS, .macCatalyst])
+                )
+            ],
             path: "Sources"
         ),
         .testTarget(

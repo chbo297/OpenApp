@@ -19,6 +19,7 @@ Pod::Spec.new do |s|
   s.swift_version    = '5.10'
 
   s.source_files     = 'Sources/**/*.swift'
+  s.ios.dependency   'BODragScroll', '~> 1.0.1'
   s.ios.frameworks   = 'UIKit', 'AVFoundation'
   s.osx.frameworks   = 'AppKit', 'AVFoundation'
 end

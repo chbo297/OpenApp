@@ -261,10 +261,10 @@ final class OpenAPPVoiceInputCoordinator {
 
     private func beginHapticReason(for source: OpenAPPInputBarVoiceInputSource) -> String {
         switch source {
-        case .textInputLongPress:
-            return "start-text-input-long-press"
-        case .voiceInputArea:
-            return "start-voice-input-touch"
+        case .keyboardModeLongPress:
+            return "start-keyboard-mode-long-press"
+        case .voiceModePress:
+            return "start-voice-mode-press"
         }
     }
 

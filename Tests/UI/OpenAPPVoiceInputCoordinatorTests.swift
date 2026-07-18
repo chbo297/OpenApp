@@ -96,19 +96,19 @@ final class OpenAPPVoiceInputCoordinatorTests: XCTestCase {
 
     func testBeginStartsRecognitionShowsPanelAndVibrates() {
         let harness = makeHarness()
-        harness.coordinator.begin(source: .voiceInputArea, location: CGPoint(x: 10, y: 10))
+        harness.coordinator.begin(source: .voiceModePress, location: CGPoint(x: 10, y: 10))
 
         XCTAssertTrue(harness.coordinator.isActive)
         XCTAssertEqual(harness.provider.startCount, 1)
         XCTAssertEqual(harness.delegate.events.prefix(2), ["begin", "update"])
-        XCTAssertEqual(harness.feedback.impactReasons, ["start-voice-input-touch"])
+        XCTAssertEqual(harness.feedback.impactReasons, ["start-voice-mode-press"])
         XCTAssertEqual(harness.feedback.prepareCount, 1)
     }
 
     func testMoveVibratesOnlyWhenReleaseActionChanges() {
         // 中线左侧取消、右侧发送的简化判定。
         let harness = makeHarness(resolver: { $0.x < 100 ? .cancel : .send })
-        harness.coordinator.begin(source: .voiceInputArea, location: CGPoint(x: 200, y: 0))
+        harness.coordinator.begin(source: .voiceModePress, location: CGPoint(x: 200, y: 0))
 
         harness.coordinator.move(to: CGPoint(x: 210, y: 0)) // send → send，不震动
         harness.coordinator.move(to: CGPoint(x: 50, y: 0))  // send → cancel，震动一次
@@ -116,14 +116,14 @@ final class OpenAPPVoiceInputCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(
             harness.feedback.impactReasons,
-            ["start-voice-input-touch", "select-cancel"]
+            ["start-voice-mode-press", "select-cancel"]
         )
         XCTAssertEqual(harness.delegate.renderStates.last?.releaseAction, .cancel)
     }
 
     func testEndInSendZoneStopsRecordingFinishesThenBackfills() {
         let harness = makeHarness()
-        harness.coordinator.begin(source: .textInputLongPress, location: .zero)
+        harness.coordinator.begin(source: .keyboardModeLongPress, location: .zero)
         harness.coordinator.updateTranscript("你好")
         harness.coordinator.end(at: .zero)
 
@@ -139,7 +139,7 @@ final class OpenAPPVoiceInputCoordinatorTests: XCTestCase {
 
     func testEndInCancelZoneStopsWithCancelledAndNoBackfill() {
         let harness = makeHarness(resolver: { _ in .cancel })
-        harness.coordinator.begin(source: .voiceInputArea, location: .zero)
+        harness.coordinator.begin(source: .voiceModePress, location: .zero)
         harness.coordinator.updateTranscript("语音内容")
         harness.coordinator.end(at: .zero)
 
@@ -153,7 +153,7 @@ final class OpenAPPVoiceInputCoordinatorTests: XCTestCase {
 
     func testSystemCancelFinishesAsCancel() {
         let harness = makeHarness()
-        harness.coordinator.begin(source: .voiceInputArea, location: .zero)
+        harness.coordinator.begin(source: .voiceModePress, location: .zero)
         harness.coordinator.systemCancel(at: .zero)
 
         XCTAssertFalse(harness.coordinator.isActive)
@@ -167,7 +167,7 @@ final class OpenAPPVoiceInputCoordinatorTests: XCTestCase {
 
     func testEndInEditZoneHandsOffWithoutFinishing() {
         let harness = makeHarness(resolver: { _ in .edit })
-        harness.coordinator.begin(source: .voiceInputArea, location: .zero)
+        harness.coordinator.begin(source: .voiceModePress, location: .zero)
         harness.coordinator.updateTranscript("编辑我")
         harness.coordinator.end(at: .zero)
 

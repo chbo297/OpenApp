@@ -51,7 +51,7 @@ public struct OpenAPPInputBarFrameChangeContext {
 }
 
 /// Main view controller for OpenAPP chat interface.
-/// Hosts a message list (tableView) and an input bar (OpenAPPInputBar).
+/// Hosts a draggable ChatPanel and an input bar (OpenAPPInputBar).
 /// Intended to be used as the rootViewController of an `OpenAPPWindow`.
 /// All layout is done via manual frames in `viewDidLayoutSubviews`.
 open class OpenAPPViewController: UIViewController {
@@ -78,6 +78,7 @@ open class OpenAPPViewController: UIViewController {
 
     /// Switch to a different session.
     public func switchSession(to sessionId: String) {
+        mockChatResponder.cancel()
         currentStreamTask?.cancel()
         currentStreamTask = nil
         currentSession?.uiState.onChange = nil
@@ -91,9 +92,12 @@ open class OpenAPPViewController: UIViewController {
 
     // MARK: - Subviews
 
-    public let tableView = UITableView()
     public let inputBar = OpenAPPInputBar()
     let voiceInputOverlayView = OpenAPPVoiceInputOverlayView()
+    let chatPanelCoordinator = OpenAPPChatPanelCoordinator()
+
+    /// ChatPanel 的固定内容视图；拖拽容器与状态由 coordinator 统一持有。
+    var chatPanelView: OpenAPPChatPanelView { chatPanelCoordinator.panelView }
 
     // MARK: - Data
 
@@ -103,11 +107,21 @@ open class OpenAPPViewController: UIViewController {
     var hasLaidOutInputBar = false
     var isDraggingExpandedInputBar = false
     var isDraggingCollapsedInputBar = false
+    var expandedResizeTracking: OpenAPPExpandedInputBarResizeTracking?
+    /// 展开 resize 期间，当前位置以零速度抬手是否会收起；仅在结果翻转时触发反馈。
+    var expandedResizeWouldCollapseAtZeroVelocity: Bool?
+    var collapsedMoveTracking: OpenAPPCollapsedInputBarMoveTracking?
     var storedExpandedInputBarWidth: CGFloat?
     var storedCollapsedInputBarPlacement: CGPoint?
     var expandedResizeStableWidth: CGFloat?
     var expandedResizeStableStartTime: TimeInterval?
     var keyboardObserver: OpenAPPKeyboardObserver?
+
+    /// UI 调试阶段是否使用模拟回复；产品默认走真实 session，开发者可在模块内临时开启。
+    var usesMockChatResponder = false
+
+    /// 对话流面板的模拟回复源（UI 调试阶段）。
+    let mockChatResponder = OpenAPPMockChatResponder()
 
     /// inputBar 布局偏好的持久化存储；frame 策略本身在 OpenAPPInputBarFramePolicy。
     let inputBarLayoutStore: OpenAPPInputBarLayoutStoring = OpenAPPUserDefaultsInputBarLayoutStore()
@@ -117,6 +131,9 @@ open class OpenAPPViewController: UIViewController {
         feedback: OpenAPPVoiceInputHapticFeedback(generator: makeVoiceRecognitionHapticGenerator())
     )
 
+    /// 展开 resize 跨越最终状态分界线时使用的触觉发生器。
+    lazy var expandedResizeDecisionHapticGenerator = makeExpandedResizeDecisionHapticGenerator()
+
     var effectiveKeyboardHeight: CGFloat {
         shouldInputBarAvoidKeyboard ? observedKeyboardHeight : 0
     }
@@ -125,10 +142,13 @@ open class OpenAPPViewController: UIViewController {
         inputBar.inputSource == .keyboard && inputBar.textField.isFirstResponder
     }
 
-    /// 宽屏展开 resize 的稳定停留时长：手指在某个宽度附近停留超过该时长后，可将该宽度记为用户偏好。
+    /// 是否允许展开态 resize 自定义宽度：开启后左侧触边仍可向右扩展，并可持久化新的首选展开宽度。
+    static let allowsExpandedResizeWidthCustomization = false
+
+    /// 启用展开宽度更新后，手指在某个宽度附近停留超过该时长，才可将该宽度记为用户偏好。
     static let expandedResizeHoldDuration: TimeInterval = 0
 
-    /// 宽屏展开 resize 的宽度稳定阈值：宽度变化不超过该值时，认为仍停留在同一个目标宽度附近。
+    /// 启用展开宽度更新后，宽度变化不超过该值时，认为仍停留在同一个目标宽度附近。
     static let expandedResizeWidthStabilityThreshold: CGFloat = 4
 
     // MARK: - Lifecycle
@@ -138,8 +158,8 @@ open class OpenAPPViewController: UIViewController {
         view.backgroundColor = .clear
 
         loadPersistedInputBarLayout()
-        setupTableView()
         setupInputBar()
+        setupChatPanel()
         setupVoiceInputOverlay()
         setupKeyboardObservers()
 
@@ -157,6 +177,7 @@ open class OpenAPPViewController: UIViewController {
     override open func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         layoutInputBar(reason: .layout)
+        layoutChatPanel()
         voiceInputOverlayView.frame = view.bounds
         view.bringSubviewToFront(voiceInputOverlayView)
     }

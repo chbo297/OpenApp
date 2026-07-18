@@ -18,7 +18,7 @@ extension OpenAPPViewController: OpenAPPInputBarDelegate {
     // 场景：文字输入态点击发送或键盘提交文本时触发。
     public func inputBar(_ bar: OpenAPPInputBar, didSendText text: String) {
         logInputBarDelegate("didSendText textLength=\(text.count)")
-        sendMessage(text: text)
+        dispatchOutgoingMessage(text: text)
     }
 
     // 场景：inputBar 内部切换键盘/语音输入源后触发。
@@ -59,18 +59,24 @@ extension OpenAPPViewController: OpenAPPInputBarDelegate {
         case .expandedResize:
             isDraggingExpandedInputBar = true
             isDraggingCollapsedInputBar = false
+            resetCollapsedMoveTracking()
+            beginExpandedResizeDecisionTrackingIfNeeded(initialFrame: inputBar.frame)
             constrainedFrame = constrainedExpandedInputBarFrame(frame)
             updateExpandedResizeWidthHoldTracking(width: constrainedFrame.width)
         case .collapsedMove:
             isDraggingExpandedInputBar = false
             isDraggingCollapsedInputBar = true
-            constrainedFrame = constrainedCollapsedInputBarFrame(frame)
+            resetExpandedResizeInteractionTracking()
+            constrainedFrame = rubberBandedCollapsedInputBarFrame(frame)
             resetExpandedResizeWidthHoldTracking()
         }
         let reason: OpenAPPInputBarFrameChangeReason = kind == .expandedResize
             ? .expandedResizePan
             : .collapsedMovePan
-        applyInputBarFrame(constrainedFrame, animated: false, reason: reason)
+        applyInputBarFrame(constrainedFrame, animation: .immediate, reason: reason)
+        if kind == .expandedResize {
+            updateExpandedResizeDecisionHapticIfNeeded(frame: inputBar.frame)
+        }
     }
 
     // 场景：menu 按钮拖拽改变 inputBar frame 的手势结束时触发；展开 resize 和收起 move 在这里统一分发。

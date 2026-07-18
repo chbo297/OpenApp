@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A1B2C3D4E5F6A7B800000081 /* BODragScroll in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D4E5F6A7B800000083 /* BODragScroll */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		A1B2C3D4E5F6A7B800000003 /* OpenAPPDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OpenAPPDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -34,6 +38,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1B2C3D4E5F6A7B800000081 /* BODragScroll in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -79,6 +84,9 @@
 				A1B2C3D4E5F6A7B800000070 /* OpenAPP */,
 			);
 			name = OpenAPPDemo;
+			packageProductDependencies = (
+				A1B2C3D4E5F6A7B800000083 /* BODragScroll */,
+			);
 			productName = OpenAPPDemo;
 			productReference = A1B2C3D4E5F6A7B800000003 /* OpenAPPDemo.app */;
 			productType = "com.apple.product-type.application";
@@ -102,6 +110,9 @@
 			);
 			mainGroup = A1B2C3D4E5F6A7B800000010;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A1B2C3D4E5F6A7B800000082 /* XCLocalSwiftPackageReference "../../../BODragScroll" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A1B2C3D4E5F6A7B800000011 /* Products */;
 			projectDirPath = "";
@@ -332,6 +343,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A1B2C3D4E5F6A7B800000082 /* XCLocalSwiftPackageReference "../../../BODragScroll" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../../BODragScroll;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A1B2C3D4E5F6A7B800000083 /* BODragScroll */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BODragScroll;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A1B2C3D4E5F6A7B800000030 /* Project object */;
 }

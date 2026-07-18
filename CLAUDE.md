@@ -1,6 +1,6 @@
 # OpenAPP SDK
 
-iOS/macOS AIAgent SDK，为移动应用提供嵌入式 AI AIAgent 能力。零第三方依赖，iOS 13+ / macOS 12+。
+iOS/macOS AIAgent SDK，为移动应用提供嵌入式 AI AIAgent 能力。Core 零第三方依赖；iOS/Catalyst ChatPanel 使用 BODragScroll，iOS 13+ / macOS 12+。
 
 ## 构建 & 测试
 
@@ -279,6 +279,16 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | `ChatMessage.swift` | UI 层消息模型 (role, text, status, toolInfo) |
 | `ChatMessageCell.swift` | 气泡样式 UITableViewCell |
 
+### UI/ChatPanel/ — 对话流面板
+
+| 文件 | 职责 |
+|------|------|
+| `OpenAPPChatPanelView.swift` | 固定最大尺寸的卡片视觉：顶部圆角/阴影/拖拽条/内容区；不持有手势和运动策略 |
+| `OpenAPPChatPanelGeometry.swift` | peek/half/full 业务档位和固定面板尺寸的纯几何结果 |
+| `OpenAPPChatPanelCoordinator.swift` | BODragScroll 唯一适配层：尺寸、detent、列表捕获、程序化移动和稳定落位同步 |
+| `OpenAPPChatMessageListView.swift` | 聊天内容区：复用 ChatMessage/ChatMessageCell，处理列表可见区补偿和条件式流式跟随 |
+| `OpenAPPMockChatResponder.swift` | 模拟回复源（UI 调试阶段）：began/partial/completed 事件形状对齐真实流式通路 |
+
 ### UI/OpenAPPViewController/ — 控制器（组装根）
 
 | 文件 | 职责 |
@@ -289,7 +299,7 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | `OpenAPPViewController+Keyboard.swift` | 键盘高度 → inputBar 避让 |
 | `OpenAPPViewController+VoiceInput.swift` | 语音输入接线层：手势事件 → coordinator；coordinator 语义回调 → overlay/inputBar/session |
 | `OpenAPPViewController+SessionBinding.swift` | session ↔ UI、sendMessage |
-| `OpenAPPViewController+TableView.swift` | 消息列表 |
+| `OpenAPPViewController+ChatPanel.swift` | 对话流面板接线：环境布局、程序化档位、键盘避让和统一消息分发；默认走真实 session |
 
 ### UI/VoiceInputOverlay/ — 语音输入浮层
 
@@ -311,3 +321,4 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | `Tests/Core/OpenAPPCoreTests.swift` | 68 测试用例，覆盖 JSON、消息、Provider、SSE、存储、Agent、Memory、UIState、Prompt、LLMExecutor |
 | `Tests/UI/OpenAPPUITests.swift` | UIKit 可用时覆盖 ChatMessage 创建 + 流式状态测试 |
 | `Tests/UI/OpenAPPVoiceInputCoordinatorTests.swift` | 语音输入状态机测试：手势转移、震动 diff、发送回填顺序、编辑交接（识别/触觉均为替身） |
+| `Tests/UI/OpenAPPChatPanelGeometryTests.swift` | 对话流面板测试：几何档位、紧凑窗口去重、列表补偿和 BODragScroll 首次/程序化落位 |

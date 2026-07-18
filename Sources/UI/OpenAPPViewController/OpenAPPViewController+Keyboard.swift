@@ -22,6 +22,11 @@ extension OpenAPPViewController {
         observedKeyboardHeight = height
         let newEffectiveKeyboardHeight = effectiveKeyboardHeight
 
+        // 对话流面板的列表 inset 跟随任何键盘高度变化（面板 frame 本身不避让）。
+        UIView.animate(withDuration: max(duration, 0.01)) {
+            self.updateChatPanelListInsets()
+        }
+
         guard abs(oldEffectiveKeyboardHeight - newEffectiveKeyboardHeight) > 0.5 else {
             return
         }

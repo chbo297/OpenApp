@@ -1,6 +1,6 @@
 # OpenAPP SDK
 
-iOS/macOS AIAgent SDK，为移动应用提供嵌入式 AI AIAgent 能力。零第三方依赖，iOS 13+ / macOS 12+。
+iOS/macOS AIAgent SDK，为移动应用提供嵌入式 AI AIAgent 能力。Core 零第三方依赖；iOS/Catalyst ChatPanel 使用 BODragScroll，iOS 13+ / macOS 12+。
 
 ## 构建 & 测试
 
@@ -110,6 +110,7 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 ## 代码规范
 
 - 当前项目仍处于本地开发、未发布阶段：不需要为了兼容旧 API 而保守。若重构能显著提升结构清晰度、命名一致性或长期可维护性，可以直接调整 public/internal API，并同步更新本仓库调用点。
+- BODragScroll 正式版本通过 SwiftPM/CocoaPods 声明；本机联合开发使用 `Scripts/Dependencies/use-local-bodragscroll.sh` 将依赖切到兄弟源码目录，禁止提交 `Packages/` 中的本地符号链接。
 - 最低支持 iOS 13，不使用 iOS 14+ only API（除非有 `#available` 守卫）
 - Sendable 严格，actor 隔离所有并发状态
 - 所有 provider/storage 通过协议抽象，可替换

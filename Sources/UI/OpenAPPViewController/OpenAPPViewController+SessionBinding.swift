@@ -9,11 +9,11 @@ import UIKit
 // MARK: - Session ↔ UI
 
 extension OpenAPPViewController {
-    /// Reload chatMessages from the current session's message history.
+    /// 从当前 session 重建唯一的 ChatPanel 消息列表。
     public func reloadFromSession() {
         guard let session = currentSession else {
             chatMessages = []
-            if isViewLoaded { tableView.reloadData() }
+            if isViewLoaded { chatPanelView.listView.setMessages([]) }
             return
         }
 
@@ -25,8 +25,7 @@ extension OpenAPPViewController {
         }
 
         if isViewLoaded {
-            tableView.reloadData()
-            scrollToBottom(animated: false)
+            chatPanelView.listView.setMessages(chatMessages)
         }
     }
 
@@ -75,9 +74,10 @@ extension OpenAPPViewController {
             guard !chatMessages.isEmpty,
                   chatMessages[chatMessages.count - 1].status == .streaming else { return }
             chatMessages[chatMessages.count - 1].text = session.uiState.streamingText
-            let indexPath = IndexPath(row: chatMessages.count - 1, section: 0)
-            tableView.reloadRows(at: [indexPath], with: .none)
-            scrollToBottom(animated: false)
+            chatPanelView.listView.updateLastMessage(
+                text: session.uiState.streamingText,
+                status: .streaming
+            )
 
         case "isStreaming":
             if !session.uiState.isStreaming {
@@ -91,8 +91,10 @@ extension OpenAPPViewController {
                       chatMessages[chatMessages.count - 1].role == .assistant else { return }
                 chatMessages[chatMessages.count - 1].text = "Error: \(error.localizedDescription)"
                 chatMessages[chatMessages.count - 1].status = .error
-                let indexPath = IndexPath(row: chatMessages.count - 1, section: 0)
-                tableView.reloadRows(at: [indexPath], with: .none)
+                chatPanelView.listView.updateLastMessage(
+                    text: "Error: \(error.localizedDescription)",
+                    status: .error
+                )
                 inputBar.setInputEnabled(true)
             }
 
@@ -108,9 +110,14 @@ extension OpenAPPViewController {
         inputBar.clearText()
         inputBar.setInputEnabled(false)
 
-        chatMessages.append(ChatMessage(role: .user, text: trimmed))
-        chatMessages.append(ChatMessage(role: .assistant, text: "", status: .streaming))
-        tableView.reloadData()
+        let userMessage = ChatMessage(role: .user, text: trimmed)
+        let assistantMessage = ChatMessage(role: .assistant, text: "", status: .streaming)
+        chatMessages.append(userMessage)
+        chatMessages.append(assistantMessage)
+        chatPanelView.listView.append(
+            contentsOf: [userMessage, assistantMessage],
+            followLatest: false
+        )
         scrollToBottom(animated: true)
 
         let stream = session.sendMessage(trimmed)

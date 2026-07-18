@@ -6,7 +6,7 @@
 [![CocoaPods Compatible](https://img.shields.io/badge/CocoaPods-Compatible-brightgreen.svg)](https://cocoapods.org)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-OpenAPP is an iOS/macOS AI agent SDK for embedding conversational agents into an app. It includes a provider abstraction, Anthropic streaming provider, tool loop, memory, skills, session persistence, built-in tools, and an optional UIKit overlay UI. The package has zero third-party dependencies.
+OpenAPP is an iOS/macOS AI agent SDK for embedding conversational agents into an app. It includes a provider abstraction, Anthropic streaming provider, tool loop, memory, skills, session persistence, built-in tools, and an optional UIKit overlay UI. The Core implementation has no third-party dependencies; the UIKit ChatPanel uses `BODragScroll` for panel and nested-list interaction.
 
 ## Package Shape
 
@@ -33,7 +33,8 @@ The repository keeps implementation files under `Sources/Core` and `Sources/UI` 
 | UIKit overlay UI | iOS 13 | UI files are guarded with `canImport(UIKit)` |
 
 - Swift tools version: 5.10
-- No third-party package dependencies
+- Core has no third-party package dependencies
+- The iOS/Catalyst ChatPanel depends on `BODragScroll` 1.0.1 or later
 
 ## Installation
 
@@ -56,6 +57,20 @@ targets: [
 ```
 
 In Xcode, use **File > Add Package Dependencies...** and select the `OpenAPP` product.
+
+### Local BODragScroll Development
+
+The Demo project directly references the sibling checkout at `../BODragScroll`. The committed root manifest still keeps the released requirement; to make `swift build` and `swift test` use that editable checkout too, run:
+
+```bash
+Scripts/Dependencies/use-local-bodragscroll.sh
+```
+
+The default source path is `../BODragScroll`; set `BODRAGSCROLL_PATH` to use another checkout. Restore the released dependency with:
+
+```bash
+Scripts/Dependencies/use-released-bodragscroll.sh
+```
 
 ### CocoaPods
 

@@ -14,16 +14,40 @@ public enum OpenAPPInputBarFramePanKind {
     case collapsedMove
 }
 
+/// inputBar frame 的应用方式：拖拽即时跟手、普通过渡或越界回弹。
+public enum OpenAPPInputBarFrameAnimation {
+    /// 不播放动画，立即应用 frame；用于布局和拖拽 changed 阶段。
+    case immediate
+
+    /// 普通 ease-out 过渡；用于展开、收起和常规吸附。
+    case standard
+
+    /// 带阻尼的边界回弹；用于展开 resize 或收起 move 越界后的合法 frame 恢复。
+    case boundaryRebound
+
+    var isAnimated: Bool {
+        switch self {
+        case .immediate:
+            return false
+        case .standard, .boundaryRebound:
+            return true
+        }
+    }
+}
+
 /// inputBar 当前输入源模式：键盘输入或语音输入。
 public enum OpenAPPInputBarInputSource {
     case keyboard
     case voice
 }
 
-/// 触发语音输入手势的来源区域，用于外部区分“语音模式按住说话”和“文字模式长按输入区”。
+/// 触发语音输入的交互场景，用于区分“语音模式按下”和“键盘模式长按”。
 public enum OpenAPPInputBarVoiceInputSource {
-    case voiceInputArea
-    case textInputLongPress
+    /// 语音输入模式下，手指按下中间“按住说话”区域。
+    case voiceModePress
+
+    /// 键盘输入模式且键盘未激活时，长按输入区域或输入源切换按钮。
+    case keyboardModeLongPress
 }
 
 /// 语音输入手势的值上下文：不向宿主暴露 UIKit recognizer，只透传阶段与宿主坐标系中的位置。
@@ -183,6 +207,7 @@ public final class OpenAPPInputBar: UIView {
     private var isHoldingVoiceInput = false
     private var activeVoiceInputSource: OpenAPPInputBarVoiceInputSource?
     private var lastVoiceInputHostLocation: CGPoint = .zero
+    private var frameAnimator: UIViewPropertyAnimator?
 
     // MARK: - Delegate
 
@@ -204,16 +229,16 @@ public final class OpenAPPInputBar: UIView {
         return pan
     }()
 
-    private lazy var voiceInputPress: UILongPressGestureRecognizer = {
-        let press = UILongPressGestureRecognizer(target: self, action: #selector(handleVoiceInputPress(_:)))
+    private lazy var voiceModePressGesture: UILongPressGestureRecognizer = {
+        let press = UILongPressGestureRecognizer(target: self, action: #selector(handleVoiceModePress(_:)))
         press.minimumPressDuration = 0
         press.cancelsTouchesInView = true
         press.delegate = self
         return press
     }()
 
-    private lazy var textInputVoiceLongPress: UILongPressGestureRecognizer = {
-        let press = UILongPressGestureRecognizer(target: self, action: #selector(handleTextInputVoiceLongPress(_:)))
+    private lazy var keyboardModeLongPressGesture: UILongPressGestureRecognizer = {
+        let press = UILongPressGestureRecognizer(target: self, action: #selector(handleKeyboardModeLongPress(_:)))
         press.minimumPressDuration = 0.1
         press.cancelsTouchesInView = true
         press.delegate = self
@@ -243,18 +268,20 @@ public final class OpenAPPInputBar: UIView {
         inputSourceButton.isEnabled = enabled
         voiceInputHoldButton.isEnabled = enabled
         plusButton.isEnabled = enabled
-        updateCollapsedInteractionState()
+        updateControlInteractionState()
     }
 
     public func setInputSource(_ source: OpenAPPInputBarInputSource, animated: Bool) {
         setInputSource(source, animated: animated, focusKeyboard: false)
     }
 
-    public func setInputBarFrame(_ frame: CGRect, animated: Bool) {
+    public func setInputBarFrame(_ frame: CGRect, animation: OpenAPPInputBarFrameAnimation) {
+        stopFrameAnimationAtCurrentFrame()
         guard !self.frame.isApproximatelyEqual(to: frame) else { return }
 
         let sizeWillChange = !bounds.size.isApproximatelyEqual(to: frame.size)
-        let apply = {
+        let apply = { [weak self] in
+            guard let self else { return }
             self.frame = frame
             if sizeWillChange {
                 self.setNeedsLayout()
@@ -262,16 +289,45 @@ public final class OpenAPPInputBar: UIView {
             }
         }
 
-        if animated {
-            UIView.animate(
-                withDuration: 0.24,
-                delay: 0,
-                options: [.curveEaseOut, .allowUserInteraction],
-                animations: apply
-            )
-        } else {
+        switch animation {
+        case .immediate:
             apply()
+        case .standard:
+            let animator = UIViewPropertyAnimator(duration: 0.24, curve: .easeOut, animations: apply)
+            startFrameAnimation(animator)
+        case .boundaryRebound:
+            let timing = UISpringTimingParameters(dampingRatio: 0.78)
+            let animator = UIViewPropertyAnimator(duration: 0.30, timingParameters: timing)
+            animator.addAnimations(apply)
+            startFrameAnimation(animator)
         }
+    }
+
+    /// 开始并持有 frame animator，使新动画或新手势可以从当前视觉状态接管。
+    private func startFrameAnimation(_ animator: UIViewPropertyAnimator) {
+        let identifier = ObjectIdentifier(animator)
+        frameAnimator = animator
+        animator.addCompletion { [weak self] _ in
+            guard let self,
+                  let currentAnimator = self.frameAnimator,
+                  ObjectIdentifier(currentAnimator) == identifier else { return }
+            self.frameAnimator = nil
+        }
+        animator.startAnimation()
+    }
+
+    /// 停止进行中的 frame 动画，并把 presentation frame 同步回真实 frame，避免交互接管时跳变。
+    private func stopFrameAnimationAtCurrentFrame() {
+        guard let animator = frameAnimator else { return }
+        let presentationFrame = layer.presentation()?.frame
+        frameAnimator = nil
+        animator.stopAnimation(true)
+        layer.removeAllAnimations()
+
+        guard let presentationFrame else { return }
+        frame = presentationFrame
+        setNeedsLayout()
+        layoutIfNeeded()
     }
 
     // MARK: - Init
@@ -331,8 +387,7 @@ public final class OpenAPPInputBar: UIView {
         voiceInputHoldButton.layer.masksToBounds = true
         voiceInputHoldButton.adjustsImageWhenHighlighted = false
         voiceInputHoldButton.accessibilityLabel = "按住说话"
-        voiceInputHoldButton.addGestureRecognizer(voiceInputPress)
-        inputAreaContainer.addGestureRecognizer(textInputVoiceLongPress)
+        voiceInputHoldButton.addGestureRecognizer(voiceModePressGesture)
 
         menuButton.addTarget(self, action: #selector(menuTapped), for: .touchUpInside)
 
@@ -343,10 +398,12 @@ public final class OpenAPPInputBar: UIView {
         inputAreaContainer.addSubview(voiceInputHoldButton)
         addSubview(menuButton)
         addGestureRecognizer(inputBarPan)
+        // 键盘模式长按需要同时覆盖输入区域和输入源按钮，因此由 inputBar 统一接收，再由代理过滤起点。
+        addGestureRecognizer(keyboardModeLongPressGesture)
 
         applyAppearance()
         updateInputSourceAppearance(animated: false, notifyDelegate: false)
-        updateCollapsedInteractionState()
+        updateControlInteractionState()
     }
 
     public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -382,7 +439,7 @@ public final class OpenAPPInputBar: UIView {
 
         layoutContent(for: size)
         updateCapsuleCornerRadius(for: size)
-        updateCollapsedInteractionState()
+        updateControlInteractionState()
     }
 
     private func layoutContent(for size: CGSize) {
@@ -443,7 +500,13 @@ public final class OpenAPPInputBar: UIView {
         inputSourceButton.frame = CGRect(x: inputSourceX, y: buttonY, width: Self.buttonSize, height: Self.buttonSize)
         menuButton.frame = CGRect(x: menuX, y: buttonY, width: Self.buttonSize, height: Self.buttonSize)
 
-        inputAreaContainer.alpha = inputAreaWidth > 0.5 ? 1 : 0
+        // inputBar 小于最小展开宽度后，输入区会从 80pt 逐步压缩到 0；alpha 同步由 1 线性过渡到 0。
+        inputAreaContainer.alpha = OpenAPPGeometry.clamp(
+            (width - Self.normalZeroInputAreaWidth)
+                / (Self.minimumExpandedWidth - Self.normalZeroInputAreaWidth),
+            0,
+            1
+        )
         inputSourceButton.alpha = OpenAPPGeometry.clamp(
             (width - Self.collapsedPlusVisibleWidth)
                 / (Self.compressedTextGapWidth - Self.collapsedPlusVisibleWidth),
@@ -472,17 +535,19 @@ public final class OpenAPPInputBar: UIView {
         }
     }
 
-    private func updateCollapsedInteractionState() {
-        let collapsed = isCollapsed
-        textField.isUserInteractionEnabled = textField.isEnabled && !collapsed && inputSource == .keyboard
+    /// 根据收起状态、输入源和控件启用状态更新交互；不依赖 alpha 等视觉表现参数。
+    private func updateControlInteractionState() {
+        let allowsExpandedControls = !isCollapsed
+        textField.isUserInteractionEnabled = textField.isEnabled
+            && allowsExpandedControls
+            && inputSource == .keyboard
         voiceInputHoldButton.isUserInteractionEnabled = voiceInputHoldButton.isEnabled
-            && !collapsed
+            && allowsExpandedControls
             && inputSource == .voice
-            && inputAreaContainer.alpha > 0.01
         inputSourceButton.isUserInteractionEnabled = inputSourceButton.isEnabled
-            && !collapsed
-            && inputSourceButton.alpha > 0.01
-        plusButton.isUserInteractionEnabled = plusButton.isEnabled && !collapsed && plusButton.alpha > 0.01
+            && allowsExpandedControls
+        plusButton.isUserInteractionEnabled = plusButton.isEnabled
+            && allowsExpandedControls
     }
 
     private func setInputSource(
@@ -533,7 +598,7 @@ public final class OpenAPPInputBar: UIView {
         voiceInputHoldButton.alpha = 1
         inputAreaContainer.bringSubviewToFront(voiceInputHoldButton)
         updateTextFieldPlaceholder()
-        updateCollapsedInteractionState()
+        updateControlInteractionState()
 
         if notifyDelegate {
             delegate?.inputBar(self, didChangeInputSource: inputSource)
@@ -580,12 +645,12 @@ public final class OpenAPPInputBar: UIView {
         delegate?.inputBarDidTapPlus(self)
     }
 
-    @objc private func handleVoiceInputPress(_ gr: UILongPressGestureRecognizer) {
-        handleVoiceInputGesture(gr, source: .voiceInputArea)
+    @objc private func handleVoiceModePress(_ gr: UILongPressGestureRecognizer) {
+        handleVoiceInputGesture(gr, source: .voiceModePress)
     }
 
-    @objc private func handleTextInputVoiceLongPress(_ gr: UILongPressGestureRecognizer) {
-        handleVoiceInputGesture(gr, source: .textInputLongPress)
+    @objc private func handleKeyboardModeLongPress(_ gr: UILongPressGestureRecognizer) {
+        handleVoiceInputGesture(gr, source: .keyboardModeLongPress)
     }
 
     private func handleVoiceInputGesture(
@@ -614,14 +679,10 @@ public final class OpenAPPInputBar: UIView {
     ) {
         guard canBeginVoiceInput(source: source) else { return }
 
-        if source == .textInputLongPress {
-            textField.resignFirstResponder()
-        }
-
         isHoldingVoiceInput = true
         activeVoiceInputSource = source
         lastVoiceInputHostLocation = hostLocation(of: gestureRecognizer)
-        setVoiceInputHolding(source == .voiceInputArea)
+        setVoiceInputHolding(source == .voiceModePress)
 
         sendVoiceGestureEvent(source: source, phase: .began)
     }
@@ -664,17 +725,20 @@ public final class OpenAPPInputBar: UIView {
 
     private func canBeginVoiceInput(source: OpenAPPInputBarVoiceInputSource) -> Bool {
         guard !isCollapsed,
-              !isHoldingVoiceInput,
-              textField.isEnabled,
-              inputAreaContainer.alpha > 0.01 else {
+              !isHoldingVoiceInput else {
             return false
         }
 
         switch source {
-        case .voiceInputArea:
-            return inputSource == .voice && voiceInputHoldButton.isEnabled
-        case .textInputLongPress:
+        case .voiceModePress:
+            return inputSource == .voice
+                && voiceInputHoldButton.isEnabled
+                && voiceInputHoldButton.isUserInteractionEnabled
+        case .keyboardModeLongPress:
+            // 键盘已激活（textField 聚焦）时长按不触发语音输入，保留原生文本编辑手势（光标/选区）。
             return inputSource == .keyboard
+                && textField.isEnabled
+                && !textField.isFirstResponder
         }
     }
 
@@ -704,6 +768,9 @@ public final class OpenAPPInputBar: UIView {
     }
 
     private func beginInputBarPan(_ gr: UIPanGestureRecognizer, in hostView: UIView) {
+        // 手指阶段：若上一次回弹尚未结束，先停在当前视觉位置，再以该位置开始新的拖拽。
+        stopFrameAnimationAtCurrentFrame()
+
         // 手指阶段：刚按下并开始拖拽，记录本次手势开始时 inputBar 是否已经是收起态。
         inputBarPanStartedCollapsed = isCollapsed
 
@@ -777,9 +844,31 @@ public final class OpenAPPInputBar: UIView {
     private func proposeExpandedResizeFrameChange(delta: CGPoint, translation: CGPoint) {
         let proposedFrame = expandedResizeFrame(deltaX: delta.x)
         delegate?.inputBar(self, wantsFrame: proposedFrame, panKind: .expandedResize)
+        rebaseExpandedResizeAnchorIfConstrained(
+            proposedFrame: proposedFrame,
+            delta: delta,
+            currentTranslation: translation
+        )
         if updateResizeToCollapsedMoveTransition(currentTranslation: translation) {
             proposeCollapsedMoveFrameChange(delta: inputBarPanDelta(from: translation))
         }
+    }
+
+    /// 宿主已把 resize 提案限制在边界时重设手势锚点，避免越界 translation 累积成反向拖动的空行程。
+    private func rebaseExpandedResizeAnchorIfConstrained(
+        proposedFrame: CGRect,
+        delta: CGPoint,
+        currentTranslation: CGPoint
+    ) {
+        // 左侧橡皮筋会改变 width 但保持右边缘连续，此时必须保留原始 translation 才能自然反向拖回。
+        // 只有 width 与右边缘都被宿主硬限制时才重设锚点，消除真正硬边界产生的反向空行程。
+        let widthWasHardConstrained = abs(proposedFrame.width - frame.width) > 0.5
+            && abs(proposedFrame.maxX - frame.maxX) > 0.5
+        let isPushingPastCollapsedWidth = isCollapsed && delta.x > 0
+        guard widthWasHardConstrained || isPushingPastCollapsedWidth else { return }
+
+        inputBarPanAnchorFrame = frame
+        inputBarPanAnchorTranslation = currentTranslation
     }
 
     private func proposeCollapsedMoveFrameChange(delta: CGPoint) {
@@ -981,6 +1070,21 @@ extension OpenAPPInputBar: UITextFieldDelegate {
 /// 处理 inputBar 内部 pan、长按语音输入等手势是否允许开始，以及手势起点区域判定。
 extension OpenAPPInputBar: UIGestureRecognizerDelegate {
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === keyboardModeLongPressGesture {
+            // 手指刚按下：只允许键盘模式、键盘未激活时，从输入区域或麦克风输入源按钮开始长按。
+            guard canBeginVoiceInput(source: .keyboardModeLongPress) else { return false }
+
+            if isTouch(touch, insideViewHierarchyOf: inputAreaContainer) {
+                return true
+            }
+
+            if isTouch(touch, insideViewHierarchyOf: inputSourceButton) {
+                return inputSourceButton.isEnabled && inputSourceButton.isUserInteractionEnabled
+            }
+
+            return false
+        }
+
         if gestureRecognizer === inputBarPan {
             guard menuButton.isEnabled else {
                 inputBarPanStartRegion = .bar
@@ -994,12 +1098,13 @@ extension OpenAPPInputBar: UIGestureRecognizerDelegate {
     }
 
     public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        if gestureRecognizer === voiceInputPress {
-            return canBeginVoiceInput(source: .voiceInputArea)
+        if gestureRecognizer === voiceModePressGesture {
+            return canBeginVoiceInput(source: .voiceModePress)
         }
 
-        if gestureRecognizer === textInputVoiceLongPress {
-            return canBeginVoiceInput(source: .textInputLongPress)
+        if gestureRecognizer === keyboardModeLongPressGesture {
+            // 从按下到 0.1 秒长按成立之间状态可能变化，因此在正式开始前再次校验。
+            return canBeginVoiceInput(source: .keyboardModeLongPress)
         }
 
         if gestureRecognizer === inputBarPan {
@@ -1024,6 +1129,12 @@ extension OpenAPPInputBar: UIGestureRecognizerDelegate {
             }
         }
         return true
+    }
+
+    /// 判断触点命中的实际视图是否属于指定视图层级，避免手工依赖 frame 和内部子视图结构。
+    private func isTouch(_ touch: UITouch, insideViewHierarchyOf view: UIView) -> Bool {
+        guard let touchedView = touch.view else { return false }
+        return touchedView === view || touchedView.isDescendant(of: view)
     }
 
     private func startRegion(for point: CGPoint) -> InputBarPanStartRegion {
