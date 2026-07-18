@@ -6,7 +6,7 @@ This guide follows the current package shape: one SwiftPM product, one Swift mod
 
 - Xcode 15 or later
 - Swift 5.10 or later
-- iOS 13+ or macOS 12+
+- iOS 13+, native macOS 12+, or Mac Catalyst 13.1+
 - An LLM API key if you use the built-in `AnthropicProvider`
 
 ## Installation
@@ -41,7 +41,7 @@ import OpenAPP
 pod 'OpenAPP', '~> 0.1'
 ```
 
-CocoaPods integration is currently iOS-focused. Swift Package Manager is the recommended integration path when you need macOS.
+CocoaPods supports the native macOS Core and the UIKit implementation on iOS/Mac Catalyst. Swift Package Manager remains the recommended integration path for new projects.
 
 ## Register a Provider
 
@@ -143,15 +143,17 @@ task.cancel()
 session.cancel()
 ```
 
-## Running the iOS Demo
+## Running the iOS and Mac Demo
 
-The demo app is an Xcode project at `Examples/iOS/OpenAPPDemo.xcodeproj`.
+The shared UIKit demo is an Xcode project at `Examples/iOS/OpenAPPDemo.xcodeproj`.
 
 ```bash
 cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json
 ```
 
-Fill in `Examples/iOS/Resources/config.json`, open the Xcode project, choose an iOS Simulator or device, and run.
+Fill in `Examples/iOS/Resources/config.json`, open the Xcode project, then choose an iOS Simulator/device or **My Mac (Mac Catalyst)** and run.
+
+OpenAPP Core also compiles for native macOS 12+. The complete overlay UI uses UIKit, so desktop apps that need the built-in OpenAPP interface should use Mac Catalyst rather than an AppKit target.
 
 ## Next Steps
 

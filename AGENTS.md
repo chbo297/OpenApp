@@ -1,15 +1,17 @@
 # OpenAPP SDK
 
-iOS/macOS AIAgent SDK，为移动应用提供嵌入式 AI AIAgent 能力。Core 零第三方依赖；iOS/Catalyst ChatPanel 使用 BODragScroll，iOS 13+ / macOS 12+。
+iOS/macOS AIAgent SDK，为应用提供嵌入式 AI AIAgent 能力。Core 零第三方依赖；完整 UIKit UI 支持 iOS 13+ / Mac Catalyst 13.1+，原生 macOS 12+ 提供 Core；iOS/Catalyst ChatPanel 使用 BODragScroll。
 
 ## 构建 & 测试
 
 ```bash
 swift build
-swift test        # 62 tests, OpenAPPCoreTests + OpenAPPUITests
+swift test        # 原生 macOS Core：68 tests
+xcodebuild -project Examples/iOS/OpenAPPDemo.xcodeproj -scheme OpenAPPDemo -configuration Debug -destination 'generic/platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO build
+xcodebuild -scheme OpenAPP -configuration Debug -destination 'platform=macOS,variant=Mac Catalyst,name=My Mac' test  # Core + UIKit：102 tests
 ```
 
-Demo App 在 `Examples/iOS/OpenAPPDemo.xcodeproj`，需要先 `cp config.json.example config.json` 并填入配置。
+Demo App 在 `Examples/iOS/OpenAPPDemo.xcodeproj`，支持 iOS 和 Mac Catalyst；需要先复制 `Resources/config.json.example` 为 `Resources/config.json` 并填入配置。
 
 ## 架构概览
 

@@ -1,7 +1,7 @@
 # OpenAPP
 
 [![Swift 5.10](https://img.shields.io/badge/Swift-5.10-orange.svg)](https://swift.org)
-[![Platforms](https://img.shields.io/badge/Platforms-iOS%2013%20%7C%20macOS%2012-blue.svg)](https://developer.apple.com)
+[![Platforms](https://img.shields.io/badge/Platforms-iOS%2013%20%7C%20macOS%2012%20%7C%20Mac%20Catalyst%2013.1-blue.svg)](https://developer.apple.com)
 [![SPM Compatible](https://img.shields.io/badge/SPM-Compatible-brightgreen.svg)](https://swift.org/package-manager/)
 [![CocoaPods Compatible](https://img.shields.io/badge/CocoaPods-Compatible-brightgreen.svg)](https://cocoapods.org)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -28,9 +28,9 @@ The repository keeps implementation files under `Sources/Core` and `Sources/UI` 
 
 | Integration | Minimum OS | Notes |
 |---|---:|---|
-| Swift Package Manager | iOS 13, macOS 12 | Single `OpenAPP` product |
-| CocoaPods | iOS 13 | Single `OpenAPP` pod |
-| UIKit overlay UI | iOS 13 | UI files are guarded with `canImport(UIKit)` |
+| Swift Package Manager | iOS 13, macOS 12, Mac Catalyst 13.1 | Single `OpenAPP` product |
+| CocoaPods | iOS 13, macOS 12, Mac Catalyst 13.1 | Single `OpenAPP` pod |
+| UIKit overlay UI | iOS 13, Mac Catalyst 13.1 | Shared UIKit implementation on mobile and desktop |
 
 - Swift tools version: 5.10
 - Core has no third-party package dependencies
@@ -129,9 +129,11 @@ for await event in stream {
 }
 ```
 
+Native macOS apps can use the complete Core API. The overlay UI is UIKit-based and is available on Mac through Mac Catalyst; OpenAPP does not currently ship a separate AppKit overlay.
+
 ## UIKit Overlay
 
-On iOS, OpenAPP can run as a passthrough overlay window above the host app:
+On iOS and Mac Catalyst, OpenAPP can run as a passthrough overlay window above the host app:
 
 ```swift
 import UIKit
@@ -160,13 +162,25 @@ For direct embedding, create an `OpenAPPViewController`, assign an agent, and sw
 
 ## Example App
 
-The iOS demo lives in `Examples/iOS/OpenAPPDemo.xcodeproj`.
+The shared UIKit demo lives in `Examples/iOS/OpenAPPDemo.xcodeproj` and runs on iOS as well as Mac Catalyst.
 
 ```bash
 cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json
 ```
 
-Fill in `Examples/iOS/Resources/config.json`, open the demo project, choose an iOS Simulator or device, and run.
+Fill in `Examples/iOS/Resources/config.json`, open the demo project, then choose an iOS destination or **My Mac (Mac Catalyst)** and run.
+
+To verify the Mac build from the command line:
+
+```bash
+xcodebuild \
+  -project Examples/iOS/OpenAPPDemo.xcodeproj \
+  -scheme OpenAPPDemo \
+  -configuration Debug \
+  -destination 'generic/platform=macOS,variant=Mac Catalyst' \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+```
 
 ## License
 

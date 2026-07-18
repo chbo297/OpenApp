@@ -1,10 +1,10 @@
 # UI Customization
 
-OpenAPP currently exposes UIKit UI types from the single `OpenAPP` module. The UI source lives under `Sources/UI`, but there is no separate `OpenAPPUI` product.
+OpenAPP currently exposes UIKit UI types from the single `OpenAPP` module on iOS and Mac Catalyst. The UI source lives under `Sources/UI`, but there is no separate `OpenAPPUI` product. Native AppKit targets can use OpenAPP Core but do not compile these UIKit overlay types.
 
 ## Overlay Window
 
-The recommended iOS entry point is `OpenAPPOverlay`. It creates a passthrough `OpenAPPWindow` above the host app and hosts an `OpenAPPViewController`.
+The recommended iOS and Mac Catalyst entry point is `OpenAPPOverlay`. It creates a passthrough `OpenAPPWindow` above the host app and hosts an `OpenAPPViewController`.
 
 ```swift
 import UIKit
