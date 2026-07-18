@@ -110,11 +110,17 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 ## 代码规范
 
 - 当前项目仍处于本地开发、未发布阶段：不需要为了兼容旧 API 而保守。若重构能显著提升结构清晰度、命名一致性或长期可维护性，可以直接调整 public/internal API，并同步更新本仓库调用点。
-- BODragScroll 正式版本通过 SwiftPM/CocoaPods 声明；本机联合开发使用 `Scripts/Dependencies/use-local-bodragscroll.sh` 将依赖切到兄弟源码目录，禁止提交 `Packages/` 中的本地符号链接。
 - 最低支持 iOS 13，不使用 iOS 14+ only API（除非有 `#available` 守卫）
 - Sendable 严格，actor 隔离所有并发状态
 - 所有 provider/storage 通过协议抽象，可替换
 - AIAgent.init 所有参数有默认值，宿主 app 零配置可启动
+
+## BODragScroll 联合开发与发布
+
+- OpenAPP 仓库位于当前目录；BODragScroll 是同级、独立的 Git 仓库 `../BODragScroll`。涉及面板拖拽或嵌套滚动时，可以直接修改该源码仓并与 OpenAPP 联调。
+- Demo 工程直接引用 `../BODragScroll`；根 Swift Package 本地联调时运行 `Scripts/Dependencies/use-local-bodragscroll.sh` 进入 editable checkout，结束后可运行 `Scripts/Dependencies/use-released-bodragscroll.sh` 恢复正式依赖。
+- 两个仓库的改动、测试、提交和版本发布必须分别管理；不要把 BODragScroll 源码混入 OpenAPP 提交。若 OpenAPP 依赖尚未发布的 BODragScroll API，先提交并发布/打标 BODragScroll，再更新 OpenAPP 的 SwiftPM/CocoaPods 版本声明并发布 OpenAPP。
+- OpenAPP 正式发布必须通过 SwiftPM/CocoaPods 引入 BODragScroll，不能依赖本机兄弟目录；禁止提交 `Packages/` 中的本地符号链接或其他机器相关路径。
 
 ## 文件导航快速索引
 
