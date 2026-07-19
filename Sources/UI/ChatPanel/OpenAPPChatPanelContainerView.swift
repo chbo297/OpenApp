@@ -139,32 +139,62 @@ final class OpenAPPChatPanelContainerView: UIView {
     }
 
     func apply(_ layout: OpenAPPChatPanelContainerLayout, animation: OpenAPPInputBarFrameAnimation) {
+        // 取出内部 BODragScroll 内容视图应该使用的目标 frame。
         let contentTargetFrame = layout.dragScrollFrame
-        let contentFrameChanged = contentView.map {
-            !$0.frame.isApproximatelyEqual(to: contentTargetFrame)
-        } ?? false
-        let targetChanged = !frame.isApproximatelyEqual(to: layout.containerFrame)
-            || !visibleMaskView.frame.isApproximatelyEqual(to: layout.maskFrame)
-            || abs(visibleMaskView.layer.cornerRadius - layout.maskCornerRadius) > 0.5
+
+        // 记录内部内容视图的 frame 是否发生变化。
+        let contentFrameChanged: Bool
+        // 如果已经安装了内容视图，就拿它当前 frame 和目标 frame 比较。
+        if let contentView {
+            // 用近似比较避免浮点小误差导致重复布局。
+            contentFrameChanged = !contentView.frame.isApproximatelyEqual(to: contentTargetFrame)
+        } else {
+            // 如果还没有安装内容视图，就认为内容 frame 没有变化。
+            contentFrameChanged = false
+        }
+
+        // 判断外层 container 的 frame 是否需要变化。
+        let containerFrameChanged = !frame.isApproximatelyEqual(to: layout.containerFrame)
+        // 判断 mask 的可见区域是否需要变化。
+        let maskFrameChanged = !visibleMaskView.frame.isApproximatelyEqual(to: layout.maskFrame)
+        // 判断 mask 圆角是否需要变化，0.5 以内的小差异直接忽略。
+        let maskCornerRadiusChanged = abs(visibleMaskView.layer.cornerRadius - layout.maskCornerRadius) > 0.5
+        // 只要 container、mask、圆角或内部内容任意一项变化，就需要重新应用布局。
+        let targetChanged = containerFrameChanged
+            || maskFrameChanged
+            || maskCornerRadiusChanged
             || contentFrameChanged
 
+        // 先同步无障碍隐藏状态；即使 frame 没变，也要保证折叠态不会被 VoiceOver 读到。
         accessibilityElementsHidden = layout.hidesAccessibilityElements
+        // 如果所有目标值都没变，就直接返回，避免创建无意义动画。
         guard targetChanged else { return }
 
+        // 如果上一个布局动画还在跑，先停在当前视觉位置，避免新旧动画打架。
         stopLayoutAnimationAtCurrentState()
 
+        // 把真正要改 frame/mask 的操作封装成闭包，方便立即执行或交给 animator 执行。
         let applyLayout = { [weak self] in
+            // 动画闭包可能晚于 view 生命周期执行，所以用 weak self 防止循环引用。
             guard let self else { return }
+            // 更新外层可见窗口的位置和尺寸。
             self.frame = layout.containerFrame
+            // 更新内部 BODragScroll 内容视图尺寸；当前保持 x/y 为 0，让它跟随 container 移动。
             self.contentView?.frame = contentTargetFrame
+            // 更新 mask 的 frame，决定 container 内部哪些区域真正可见。
             self.visibleMaskView.frame = layout.maskFrame
+            // 更新 mask 圆角，让收起时逐步变成 inputBar 胶囊形状。
             self.visibleMaskView.layer.cornerRadius = layout.maskCornerRadius
+            // 再同步一次无障碍隐藏状态，保证动画执行后状态仍正确。
             self.accessibilityElementsHidden = layout.hidesAccessibilityElements
         }
 
+        // 如果当前变化需要动画，就用 inputBar 同一套动画参数驱动 container/mask。
         if let animator = animation.makeAnimator(animations: applyLayout) {
+            // 持有并启动 animator，后续新手势可以从当前动画位置接管。
             startLayoutAnimation(animator)
         } else {
+            // 拖拽跟手或普通布局刷新不需要动画，直接应用目标布局。
             applyLayout()
         }
     }
