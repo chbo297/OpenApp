@@ -193,7 +193,7 @@ final class OpenAPPChatPanelGeometryTests: XCTestCase {
         )
         XCTAssertEqual(
             layout.dragScrollFrame,
-            CGRect(x: -collapsedFrame.minX, y: 0, width: bounds.width, height: bounds.height)
+            CGRect(origin: .zero, size: bounds.size)
         )
         XCTAssertEqual(
             layout.maskFrame,

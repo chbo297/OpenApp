@@ -8,8 +8,8 @@ import UIKit
 
 /// ChatPanel 裁剪容器的纯布局结果。
 ///
-/// `dragScrollView` 保持 OpenAPPViewController 坐标系中的真实尺寸；container 和 mask 只控制
-/// 可见窗口，避免 inputBar 收起动画污染 BODragScroll 的滚动几何。
+/// `dragScrollView` 保持原始尺寸并跟随 container 横向移动；container 和 mask 只控制可见窗口，
+/// 避免 inputBar 收起动画污染 BODragScroll 的滚动几何。
 struct OpenAPPChatPanelContainerLayout: Equatable {
     let containerFrame: CGRect
     let dragScrollFrame: CGRect
@@ -55,12 +55,7 @@ struct OpenAPPChatPanelContainerLayout: Equatable {
             to: collapsedContainerFrame,
             progress: collapseProgress
         )
-        dragScrollFrame = CGRect(
-            x: bounds.minX - containerFrame.minX,
-            y: bounds.minY - containerFrame.minY,
-            width: bounds.width,
-            height: bounds.height
-        )
+        dragScrollFrame = CGRect(origin: .zero, size: bounds.size)
 
         let expandedMaskFrame = CGRect(origin: .zero, size: containerFrame.size)
         let collapsedMaskFrame = CGRect(
