@@ -183,22 +183,6 @@ extension OpenAPPChatPanelCoordinator: BODragScrollBehaviorProvider {
         }
         return geometry.panelSize
     }
-
-    func dragScrollView(
-        _ dragScrollView: BODragScrollView,
-        segmentsFor scrollView: UIScrollView
-    ) -> [BODragScrollInnerScrollSegment]? {
-        guard scrollView === panelView.listView.participantScrollView,
-              let geometry else { return nil }
-        return [.init(displayHeight: geometry.fullHeight)]
-    }
-
-    func dragScrollView(
-        _ dragScrollView: BODragScrollView,
-        canCapture scrollView: UIScrollView
-    ) -> Bool {
-        scrollView === panelView.listView.participantScrollView
-    }
 }
 
 // MARK: - BODragScrollEventDelegate

@@ -158,6 +158,89 @@ final class OpenAPPChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(coordinator.dragScrollView.displayHeight, geometry.fullHeight, accuracy: 0.5)
     }
 
+    func testChatPanelContainerLayoutExpandedShowsEntireContainer() {
+        let layout = OpenAPPChatPanelContainerLayout(
+            bounds: bounds,
+            inputBarFrame: inputBarExpandedFrame,
+            inputBarExpandedFrame: inputBarExpandedFrame,
+            inputBarCornerRadius: 16
+        )
+
+        XCTAssertEqual(layout.containerFrame, bounds)
+        XCTAssertEqual(layout.dragScrollFrame, bounds)
+        XCTAssertEqual(layout.maskFrame, bounds)
+        XCTAssertEqual(layout.maskCornerRadius, 0, accuracy: 0.5)
+        XCTAssertFalse(layout.hidesAccessibilityElements)
+    }
+
+    func testChatPanelContainerLayoutCollapsedKeepsFullHeightAndMasksToInputBar() {
+        let collapsedFrame = CGRect(
+            x: bounds.maxX - OpenAPPInputBar.collapsedMinWidth - 12,
+            y: 620,
+            width: OpenAPPInputBar.collapsedMinWidth,
+            height: OpenAPPInputBar.barHeight
+        )
+        let layout = OpenAPPChatPanelContainerLayout(
+            bounds: bounds,
+            inputBarFrame: collapsedFrame,
+            inputBarExpandedFrame: inputBarExpandedFrame,
+            inputBarCornerRadius: OpenAPPInputBar.barHeight / 2
+        )
+
+        XCTAssertEqual(
+            layout.containerFrame,
+            CGRect(x: collapsedFrame.minX, y: 0, width: collapsedFrame.width, height: bounds.height)
+        )
+        XCTAssertEqual(
+            layout.dragScrollFrame,
+            CGRect(x: -collapsedFrame.minX, y: 0, width: bounds.width, height: bounds.height)
+        )
+        XCTAssertEqual(
+            layout.maskFrame,
+            CGRect(x: 0, y: collapsedFrame.minY, width: collapsedFrame.width, height: collapsedFrame.height)
+        )
+        XCTAssertEqual(layout.maskCornerRadius, OpenAPPInputBar.barHeight / 2, accuracy: 0.5)
+        XCTAssertTrue(layout.hidesAccessibilityElements)
+    }
+
+    func testChatPanelContainerHitTestingFollowsVisibleMask() {
+        let collapsedFrame = CGRect(
+            x: bounds.maxX - OpenAPPInputBar.collapsedMinWidth - 12,
+            y: 620,
+            width: OpenAPPInputBar.collapsedMinWidth,
+            height: OpenAPPInputBar.barHeight
+        )
+        let layout = OpenAPPChatPanelContainerLayout(
+            bounds: bounds,
+            inputBarFrame: collapsedFrame,
+            inputBarExpandedFrame: inputBarExpandedFrame,
+            inputBarCornerRadius: OpenAPPInputBar.barHeight / 2
+        )
+        let container = OpenAPPChatPanelContainerView()
+        let contentView = UIView()
+
+        container.installContentView(contentView)
+        container.apply(layout, animation: .immediate)
+
+        XCTAssertNil(container.hitTest(CGPoint(x: 20, y: 200), with: nil))
+        XCTAssertTrue(container.hitTest(CGPoint(x: 20, y: collapsedFrame.midY), with: nil) === contentView)
+        XCTAssertNil(container.hitTest(CGPoint(x: 0, y: collapsedFrame.minY), with: nil))
+    }
+
+    func testViewControllerInstallsDragScrollViewInsideChatPanelContainer() {
+        let viewController = OpenAPPViewController()
+        viewController.loadViewIfNeeded()
+
+        XCTAssertTrue(viewController.chatPanelCoordinator.dragScrollView.superview === viewController.chatPanelContainer)
+        XCTAssertTrue(viewController.chatPanelContainer.superview === viewController.view)
+
+        let containerIndex = viewController.view.subviews.firstIndex { $0 === viewController.chatPanelContainer }
+        let inputBarIndex = viewController.view.subviews.firstIndex { $0 === viewController.inputBar }
+        XCTAssertNotNil(containerIndex)
+        XCTAssertNotNil(inputBarIndex)
+        XCTAssertLessThan(containerIndex ?? 0, inputBarIndex ?? 0)
+    }
+
     private func makeGeometry() -> OpenAPPChatPanelGeometry? {
         OpenAPPChatPanelGeometry(
             bounds: bounds,

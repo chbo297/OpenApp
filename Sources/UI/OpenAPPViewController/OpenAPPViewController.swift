@@ -94,6 +94,7 @@ open class OpenAPPViewController: UIViewController {
 
     public let inputBar = OpenAPPInputBar()
     let voiceInputOverlayView = OpenAPPVoiceInputOverlayView()
+    let chatPanelContainer = OpenAPPChatPanelContainerView()
     let chatPanelCoordinator = OpenAPPChatPanelCoordinator()
 
     /// ChatPanel 的固定内容视图；拖拽容器与状态由 coordinator 统一持有。

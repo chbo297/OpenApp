@@ -119,11 +119,16 @@ extension OpenAPPViewController {
         reason: OpenAPPInputBarFrameChangeReason
     ) {
         let oldFrame = inputBar.frame
-        guard didInputBarFrameChange(from: oldFrame, to: targetFrame) else {
-            return
+        let didChange = didInputBarFrameChange(from: oldFrame, to: targetFrame)
+        if didChange {
+            inputBar.setInputBarFrame(targetFrame, animation: animation)
         }
-
-        inputBar.setInputBarFrame(targetFrame, animation: animation)
+        applyChatPanelContainerLayout(
+            inputBarFrame: inputBar.frame,
+            inputBarExpandedFrame: OpenAPPInputBarFramePolicy.preferredExpandedFrame(inputBarLayoutContext),
+            animation: animation
+        )
+        guard didChange else { return }
         notifyInputBarFrameChangeIfNeeded(
             oldFrame: oldFrame,
             newFrame: inputBar.frame,

@@ -15,7 +15,9 @@ extension OpenAPPViewController {
 
     /// 初始化对话流面板：层级插在 inputBar 之下，默认半屏档。
     func setupChatPanel() {
-        view.insertSubview(chatPanelCoordinator.dragScrollView, belowSubview: inputBar)
+        chatPanelContainer.translatesAutoresizingMaskIntoConstraints = true
+        chatPanelContainer.installContentView(chatPanelCoordinator.dragScrollView)
+        view.insertSubview(chatPanelContainer, belowSubview: inputBar)
         mockChatResponder.onEvent = { [weak self] event in
             self?.handleMockChatEvent(event)
         }
@@ -23,12 +25,32 @@ extension OpenAPPViewController {
 
     /// 将当前 viewport、安全区和 inputBar 展开宽度交给 coordinator 更新固定面板几何。
     func layoutChatPanel() {
+        let inputBarExpandedFrame = OpenAPPInputBarFramePolicy.preferredExpandedFrame(inputBarLayoutContext)
         chatPanelCoordinator.updateLayout(
             bounds: view.bounds,
             safeAreaInsets: view.safeAreaInsets,
-            inputBarExpandedFrame: OpenAPPInputBarFramePolicy.preferredExpandedFrame(inputBarLayoutContext),
+            inputBarExpandedFrame: inputBarExpandedFrame,
             bottomAvoidingInset: chatPanelBottomAvoidingInset
         )
+        applyChatPanelContainerLayout(
+            inputBarFrame: inputBar.frame,
+            inputBarExpandedFrame: inputBarExpandedFrame,
+            animation: .immediate
+        )
+    }
+
+    func applyChatPanelContainerLayout(
+        inputBarFrame: CGRect,
+        inputBarExpandedFrame: CGRect,
+        animation: OpenAPPInputBarFrameAnimation
+    ) {
+        let layout = OpenAPPChatPanelContainerLayout(
+            bounds: view.bounds,
+            inputBarFrame: inputBarFrame,
+            inputBarExpandedFrame: inputBarExpandedFrame,
+            inputBarCornerRadius: inputBar.layer.cornerRadius
+        )
+        chatPanelContainer.apply(layout, animation: animation)
     }
 
     /// 业务主动切换档位，实际动画和中途打断由 BODragScroll 管理。

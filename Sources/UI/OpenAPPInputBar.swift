@@ -33,6 +33,20 @@ public enum OpenAPPInputBarFrameAnimation {
             return true
         }
     }
+
+    func makeAnimator(animations: @escaping () -> Void) -> UIViewPropertyAnimator? {
+        switch self {
+        case .immediate:
+            return nil
+        case .standard:
+            return UIViewPropertyAnimator(duration: 0.24, curve: .easeOut, animations: animations)
+        case .boundaryRebound:
+            let timing = UISpringTimingParameters(dampingRatio: 0.78)
+            let animator = UIViewPropertyAnimator(duration: 0.30, timingParameters: timing)
+            animator.addAnimations(animations)
+            return animator
+        }
+    }
 }
 
 /// inputBar 当前输入源模式：键盘输入或语音输入。
@@ -289,17 +303,10 @@ public final class OpenAPPInputBar: UIView {
             }
         }
 
-        switch animation {
-        case .immediate:
+        if let animator = animation.makeAnimator(animations: apply) {
+            startFrameAnimation(animator)
+        } else {
             apply()
-        case .standard:
-            let animator = UIViewPropertyAnimator(duration: 0.24, curve: .easeOut, animations: apply)
-            startFrameAnimation(animator)
-        case .boundaryRebound:
-            let timing = UISpringTimingParameters(dampingRatio: 0.78)
-            let animator = UIViewPropertyAnimator(duration: 0.30, timingParameters: timing)
-            animator.addAnimations(apply)
-            startFrameAnimation(animator)
         }
     }
 
